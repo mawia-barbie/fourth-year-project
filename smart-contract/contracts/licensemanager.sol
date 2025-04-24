@@ -1,149 +1,110 @@
-
-// pragma solidity ^0.8.0;
-
-// contract LicenseManager {
-//     // Structure to store license details
-//     struct License {
-//         string licenseKey;     // Unique license key (file hash)
-//         address owner;        // Address of the license issuer
-//         bool isValid;         // License validity status
-//         uint256 issuanceDate; // Timestamp when license was issued
-//         string softwareId;    // Identifier for the software
-//     }
-
-//     // Mappings for storage
-//     mapping(string => License) public licenses; // Maps license key to License struct
-//     mapping(address => string[]) public userLicenses; // Maps user address to their license keys
-
-//     // Events for frontend integration
-//     event LicenseIssued(string indexed licenseKey, address indexed owner, string softwareId);
-//     event LicenseVerified(string indexed licenseKey, bool isValid);
-//     event LicenseCracked(string indexed licenseKey, address indexed reporter);
-
-//     // Issue a new license
-//     function issueLicense(string memory _licenseKey, string memory _softwareId) public {
-//         require(bytes(_licenseKey).length > 0, "License key cannot be empty");
-//         require(bytes(licenses[_licenseKey].licenseKey).length == 0, "License key already exists");
-
-//         licenses[_licenseKey] = License({
-//             licenseKey: _licenseKey,
-//             owner: msg.sender,
-//             isValid: true,
-//             issuanceDate: block.timestamp,
-//             softwareId: _softwareId
-//         });
-
-//         userLicenses[msg.sender].push(_licenseKey);
-//         emit LicenseIssued(_licenseKey, msg.sender, _softwareId);
-//     }
-
-//     // Verify if a license is authentic
-//     function isAuthentic(string memory _licenseKey) public returns (bool) {
-//         License memory license = licenses[_licenseKey];
-//         bool isValid = bytes(license.licenseKey).length != 0 && license.isValid;
-//         emit LicenseVerified(_licenseKey, isValid);
-//         return isValid;
-//     }
-
-//     // Report a cracked license
-//     function reportCracked(string memory _licenseKey) public {
-//         require(bytes(licenses[_licenseKey].licenseKey).length != 0, "License does not exist");
-//         require(licenses[_licenseKey].isValid, "License is already invalid");
-
-//         licenses[_licenseKey].isValid = false;
-//         emit LicenseCracked(_licenseKey, msg.sender);
-//     }
-
-//     // Get all licenses for a user
-//     function getUserLicenses(address _user) public view returns (string[] memory) {
-//         return userLicenses[_user];
-//     }
-// }
-
-
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
+
 contract LicenseManager {
+    address public admin;
+    mapping(address => User) public users;
+    mapping(address => string[]) public userLicenses;
+
+    struct User {
+        bool isRegistered;
+        bool isApproved;
+        bool isRejected;
+        string rejectionReason;
+    }
+
+    event UserRegistered(address indexed user);
+    event UserApproved(address indexed user);
+    event UserRejected(address indexed user, string reason);
+    event LicenseIssued(address indexed user, string licenseKey, string softwareName);
+    event LicenseTampered(string licenseKey, address reporter);
+    event LicenseCracked(string licenseKey, address reporter);
+
     struct License {
-        string licenseKey;
-        address owner;
-        bool isValid;
-        uint256 issuanceDate;
-        string softwareId;
-        uint256 version;
+        string softwareName;
+        bool exists;
+        bool isTampered;
+        bool isCracked;
     }
 
     mapping(string => License) public licenses;
-    mapping(address => string[]) public userLicenses;
 
-    event LicenseIssued(string indexed licenseKey, address indexed owner, string softwareId, uint256 version);
-    event LicenseVerified(string indexed licenseKey, bool isValid);
-    event LicenseTampered(string indexed licenseKey, address indexed reporter);
-    event LicenseCracked(string indexed licenseKey, address indexed reporter);
-
-    function issueLicense(string memory _licenseKey, string memory _softwareId) public {
-        require(bytes(_licenseKey).length > 0, "License key cannot be empty");
-        License storage license = licenses[_licenseKey];
-        if (bytes(license.licenseKey).length == 0) {
-            licenses[_licenseKey] = License({
-                licenseKey: _licenseKey,
-                owner: msg.sender,
-                isValid: true,
-                issuanceDate: block.timestamp,
-                softwareId: _softwareId,
-                version: 1
-            });
-            userLicenses[msg.sender].push(_licenseKey);
-        } else {
-            require(license.owner == msg.sender, "Only the original owner can update this license");
-            require(license.isValid, "Cannot update an invalid license");
-            license.version += 1;
-            license.issuanceDate = block.timestamp;
-        }
-        emit LicenseIssued(_licenseKey, msg.sender, _softwareId, license.version);
+    constructor() {
+        admin = msg.sender;
+        users[admin] = User(true, true, false, ""); // Admin is auto-approved
     }
 
-    function isAuthentic(string memory _licenseKey) public returns (bool) {
-        License memory license = licenses[_licenseKey];
-        bool isValid = bytes(license.licenseKey).length != 0 && license.isValid;
-        emit LicenseVerified(_licenseKey, isValid);
-        return isValid;
+    modifier onlyAdmin() {
+        require(msg.sender == admin, "Only admin can perform this action");
+        _;
     }
 
-    function reportTampered(string memory _licenseKey) public {
-        require(bytes(licenses[_licenseKey].licenseKey).length != 0, "License does not exist");
-        require(licenses[_licenseKey].isValid, "License is already invalid");
-        licenses[_licenseKey].isValid = false;
-        emit LicenseTampered(_licenseKey, msg.sender);
+    modifier onlyApprovedUser() {
+        require(users[msg.sender].isApproved, "User not approved");
+        _;
     }
 
-    function reportCracked(string memory _licenseKey) public {
-        require(bytes(licenses[_licenseKey].licenseKey).length != 0, "License does not exist");
-        require(licenses[_licenseKey].isValid, "License is already invalid");
-        licenses[_licenseKey].isValid = false;
-        emit LicenseCracked(_licenseKey, msg.sender);
+    function registerUser() external {
+        require(!users[msg.sender].isRegistered, "User already registered");
+        users[msg.sender] = User(true, false, false, "");
+        emit UserRegistered(msg.sender);
     }
 
-    function getUserLicenses(address _user) public view returns (string[] memory) {
-        return userLicenses[_user];
+    function approveUser(address user) external onlyAdmin {
+        require(users[user].isRegistered, "User not registered");
+        require(!users[user].isApproved, "User already approved");
+        users[user].isApproved = true;
+        users[user].isRejected = false;
+        users[user].rejectionReason = "";
+        emit UserApproved(user);
     }
 
-    function getLicenseDetails(string memory _licenseKey) public view returns (
-        address owner,
-        bool isValid,
-        uint256 issuanceDate,
-        string memory softwareId,
-        uint256 version
-    ) {
-        License memory license = licenses[_licenseKey];
-        require(bytes(license.licenseKey).length != 0, "License does not exist");
-        return (
-            license.owner,
-            license.isValid,
-            license.issuanceDate,
-            license.softwareId,
-            license.version
-        );
+    function rejectUser(address user, string calldata reason) external onlyAdmin {
+        require(users[user].isRegistered, "User not registered");
+        require(!users[user].isRejected, "User already rejected");
+        require(bytes(reason).length > 0, "Rejection reason required");
+        users[user].isApproved = false;
+        users[user].isRejected = true;
+        users[user].rejectionReason = reason;
+        emit UserRejected(user, reason);
+    }
+
+    function getUserStatus(address user) external view returns (bool isRegistered, bool isApproved, bool isRejected, string memory rejectionReason) {
+        User memory u = users[user];
+        return (u.isRegistered, u.isApproved, u.isRejected, u.rejectionReason);
+    }
+
+    function issueLicense(string calldata licenseKey, string calldata softwareName) external onlyApprovedUser {
+        require(!licenses[licenseKey].exists, "License already exists");
+        licenses[licenseKey] = License(softwareName, true, false, false);
+        userLicenses[msg.sender].push(licenseKey);
+        emit LicenseIssued(msg.sender, licenseKey, softwareName);
+    }
+
+    function getUserLicenses(address user) external view returns (string[] memory) {
+        return userLicenses[user];
+    }
+
+    function getLicenseDetails(string calldata licenseKey) external view returns (string memory softwareName, bool exists, bool isTampered, bool isCracked) {
+        License memory license = licenses[licenseKey];
+        return (license.softwareName, license.exists, license.isTampered, license.isCracked);
+    }
+
+    function isAuthentic(string calldata licenseKey) external view returns (bool) {
+        License memory license = licenses[licenseKey];
+        return license.exists && !license.isTampered && !license.isCracked;
+    }
+
+    function reportTampered(string calldata licenseKey) external onlyApprovedUser {
+        require(licenses[licenseKey].exists, "License does not exist");
+        licenses[licenseKey].isTampered = true;
+        emit LicenseTampered(licenseKey, msg.sender);
+    }
+
+    function reportCracked(string calldata licenseKey) external onlyApprovedUser {
+        require(licenses[licenseKey].exists, "License does not exist");
+        require(!licenses[licenseKey].isCracked, "License already cracked");
+        licenses[licenseKey].isCracked = true;
+        emit LicenseCracked(licenseKey, msg.sender);
     }
 }
-

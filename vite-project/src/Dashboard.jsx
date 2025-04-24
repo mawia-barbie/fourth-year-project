@@ -7,12 +7,18 @@ function Dashboard() {
   const [file, setFile] = useState(null);
   const [softwareName, setSoftwareName] = useState("");
   const [selectedLicenseKey, setSelectedLicenseKey] = useState("");
-  const [userLicenses, setUserLicenses] = useState([]); // Array of { licenseKey, softwareName }
+  const [userLicenses, setUserLicenses] = useState([]);
   const [status, setStatus] = useState("");
   const [licenseKey, setLicenseKey] = useState("");
   const [loading, setLoading] = useState(false);
+  const [userStatus, setUserStatus] = useState({
+    isRegistered: false,
+    isApproved: false,
+    isRejected: false,
+    rejectionReason: "",
+  });
 
-  const contractAddress = "0xe84AC9f961bc601f0C396882BEFdB96987972581"; // Updated contract address
+  const contractAddress = "0x695130B36cbc7BFD9C5B8D3E32125564e0381F94"; // TODO: Replace with new deployed address
   const contractABI = LicenseManagerArtifact.abi;
 
   async function getContract() {
@@ -48,74 +54,105 @@ function Dashboard() {
     }
   }
 
+  async function registerUser() {
+    const contractData = await getContract();
+    if (!contractData) return;
+
+    const { contract } = contractData;
+    setLoading(true);
+    try {
+      const tx = await contract.registerUser({ gasLimit: 300000 });
+      await tx.wait();
+      setStatus("Registration submitted. Awaiting admin approval.");
+      fetchUserStatus();
+    } catch (error) {
+      let errorMessage = error.message;
+      if (error.data && error.data.message) errorMessage = error.data.message;
+      else if (error.reason) errorMessage = error.reason;
+      setStatus(`Error registering: ${errorMessage}`);
+      console.error("registerUser error:", error);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function fetchUserStatus() {
+    const contractData = await getContract();
+    if (!contractData) return;
+
+    const { contract, signer } = contractData;
+    try {
+      const signerAddress = await signer.getAddress();
+      const [isRegistered, isApproved, isRejected, rejectionReason] = await contract.getUserStatus(signerAddress);
+      setUserStatus({ isRegistered, isApproved, isRejected, rejectionReason });
+      console.log("User status:", { isRegistered, isApproved, isRejected, rejectionReason });
+    } catch (error) {
+      setStatus(`Error fetching user status: ${error.message}`);
+      console.error("fetchUserStatus error:", error);
+    }
+  }
+
   useEffect(() => {
-    async function fetchUserLicenses() {
-      const contractData = await getContract();
-      if (contractData) {
-        const { contract, signer } = contractData;
-        try {
-          const signerAddress = await signer.getAddress();
-          console.log("Fetching licenses for address:", signerAddress);
-          const licenseKeys = await contract.getUserLicenses(signerAddress);
-          console.log("Fetched license keys:", licenseKeys);
+    fetchUserStatus();
 
-          const licenses = await Promise.all(
-            licenseKeys.map(async (key) => {
-              try {
-                const details = await contract.getLicenseDetails(key);
-                console.log(`Raw license details for ${key}:`, details);
-                const softwareName =
-                  details.softwareName ||
-                  details.name ||
-                  details.software ||
-                  (Array.isArray(details) ? details[0] : null) ||
-                  "Untitled License";
-                console.log(`Parsed softwareName for ${key}:`, softwareName);
-                if (!softwareName || softwareName === "Untitled License") {
-                  console.warn(`softwareName is invalid for ${key}:`, details);
+    if (userStatus.isApproved) {
+      async function fetchUserLicenses() {
+        const contractData = await getContract();
+        if (contractData) {
+          const { contract, signer } = contractData;
+          try {
+            const signerAddress = await signer.getAddress();
+            console.log("Fetching licenses for address:", signerAddress);
+            const licenseKeys = await contract.getUserLicenses(signerAddress);
+            console.log("Fetched license keys:", licenseKeys);
+
+            const licenses = await Promise.all(
+              licenseKeys.map(async (key) => {
+                try {
+                  const details = await contract.getLicenseDetails(key);
+                  console.log(`Raw license details for ${key}:`, details);
+                  const softwareName = details.softwareName || "Untitled License";
+                  return { licenseKey: key, softwareName };
+                } catch (error) {
+                  console.error(`Error fetching details for license ${key}:`, error);
+                  return { licenseKey: key, softwareName: "Error Fetching Name" };
                 }
-                return {
-                  licenseKey: key,
-                  softwareName,
-                };
-              } catch (error) {
-                console.error(`Error fetching details for license ${key}:`, error);
-                return { licenseKey: key, softwareName: "Error Fetching Name" };
-              }
-            })
-          );
+              })
+            );
 
-          console.log("Fetched licenses with details:", licenses);
-          setUserLicenses(licenses);
-          if (licenses.length > 0) {
-            setSelectedLicenseKey(licenses[0].licenseKey);
-          } else {
-            setStatus("No licenses found. Generate a license first.");
+            console.log("Fetched licenses with details:", licenses);
+            setUserLicenses(licenses);
+            if (licenses.length > 0) {
+              setSelectedLicenseKey(licenses[0].licenseKey);
+            } else {
+              setStatus("No licenses found. Generate a license first.");
+            }
+          } catch (error) {
+            setStatus(`Error fetching licenses: ${error.message}`);
+            console.error("fetchUserLicenses error:", error);
           }
-        } catch (error) {
-          setStatus(`Error fetching licenses: ${error.message}`);
-          console.error("fetchUserLicenses error:", error);
         }
       }
-    }
-    fetchUserLicenses();
 
-    async function setupEventListeners() {
-      const contractData = await getContract();
-      if (contractData) {
-        const { contract } = contractData;
-        contract.on("LicenseTampered", (licenseKey, reporter) => {
-          setStatus(`Alert: Document with license ${licenseKey} has been tampered!`);
-          console.log("LicenseTampered event:", { licenseKey, reporter });
-        });
-        contract.on("LicenseCracked", (licenseKey, reporter) => {
-          setStatus(`Alert: Document with license ${licenseKey} has been cracked!`);
-          console.log("LicenseCracked event:", { licenseKey, reporter });
-        });
+      async function setupEventListeners() {
+        const contractData = await getContract();
+        if (contractData) {
+          const { contract } = contractData;
+          contract.on("LicenseTampered", (licenseKey, reporter) => {
+            setStatus(`Alert: Document with license ${licenseKey} has been tampered!`);
+            console.log("LicenseTampered event:", { licenseKey, reporter });
+          });
+          contract.on("LicenseCracked", (licenseKey, reporter) => {
+            setStatus(`Alert: Document with license ${licenseKey} has been cracked!`);
+            console.log("LicenseCracked event:", { licenseKey, reporter });
+          });
+        }
       }
+
+      fetchUserLicenses();
+      setupEventListeners();
     }
-    setupEventListeners();
-  }, []);
+  }, [userStatus.isApproved]);
 
   async function generateAndStoreLicense() {
     if (!file) {
@@ -137,32 +174,13 @@ function Dashboard() {
         console.log("Generated fileHash:", fileHash);
 
         const licenseName = softwareName.trim() || "Untitled License";
-        console.log("User-provided softwareName:", softwareName);
         console.log("License name to be used:", licenseName);
 
         const tx = await contract.issueLicense(fileHash, licenseName, { gasLimit: 300000 });
         await tx.wait();
         console.log("License issued transaction:", tx);
 
-        const license = await contract.getLicenseDetails(fileHash);
-        console.log("Raw stored license details:", license);
-        const storedName =
-          license.softwareName ||
-          license.name ||
-          license.software ||
-          (Array.isArray(license) ? license[0] : null) ||
-          "Untitled License";
-        console.log("Parsed stored softwareName:", storedName);
-        if (storedName !== licenseName) {
-          console.warn("Stored softwareName does not match provided name!", {
-            provided: licenseName,
-            stored: storedName,
-            rawDetails: license,
-          });
-        }
-
-        setStatus(`License issued: ${fileHash} (Name: ${storedName})`);
-        console.log("License issued:", license);
+        setStatus(`License issued: ${fileHash} (Name: ${licenseName})`);
 
         const signerAddress = await signer.getAddress();
         const licenseKeys = await contract.getUserLicenses(signerAddress);
@@ -170,21 +188,8 @@ function Dashboard() {
         const licenses = await Promise.all(
           licenseKeys.map(async (key) => {
             const details = await contract.getLicenseDetails(key);
-            console.log(`Raw updated details for ${key}:`, details);
-            const softwareName =
-              details.softwareName ||
-              details.name ||
-              details.software ||
-              (Array.isArray(details) ? details[0] : null) ||
-              "Untitled License";
-            console.log(`Parsed updated softwareName for ${key}:`, softwareName);
-            if (!softwareName || softwareName === "Untitled License") {
-              console.warn(`softwareName is invalid for ${key}:`, details);
-            }
-            return {
-              licenseKey: key,
-              softwareName,
-            };
+            const softwareName = details.softwareName || "Untitled License";
+            return { licenseKey: key, softwareName };
           })
         );
         console.log("Updated licenses:", licenses);
@@ -193,11 +198,8 @@ function Dashboard() {
         setSoftwareName("");
       } catch (error) {
         let errorMessage = error.message;
-        if (error.data && error.data.message) {
-          errorMessage = error.data.message;
-        } else if (error.reason) {
-          errorMessage = error.reason;
-        }
+        if (error.data && error.data.message) errorMessage = error.data.message;
+        else if (error.reason) errorMessage = error.reason;
         setStatus(`Error issuing license: ${errorMessage}`);
         console.error("generateAndStoreLicense error:", error);
       } finally {
@@ -236,7 +238,7 @@ function Dashboard() {
         try {
           licenseDetails = await contract.getLicenseDetails(selectedLicenseKey);
           console.log("Raw license details:", licenseDetails);
-          licenseExists = licenseDetails.exists || (Array.isArray(licenseDetails) && licenseDetails[1]) || true;
+          licenseExists = licenseDetails.exists;
         } catch (error) {
           setStatus(`Document is Inauthentic: No license found for key ${selectedLicenseKey}`);
           console.error("getLicenseDetails error:", error);
@@ -284,8 +286,8 @@ function Dashboard() {
       console.log("Checking license details for:", selectedLicenseKey);
       const licenseDetails = await contract.getLicenseDetails(selectedLicenseKey);
       console.log("Raw license details:", licenseDetails);
-      const exists = licenseDetails.exists || (Array.isArray(licenseDetails) && licenseDetails[1]) || true;
-      const isCracked = licenseDetails.isCracked || (Array.isArray(licenseDetails) && licenseDetails[2]) || false;
+      const exists = licenseDetails.exists;
+      const isCracked = licenseDetails.isCracked;
       if (!exists) {
         setStatus(`Error: License ${selectedLicenseKey} does not exist`);
         return;
@@ -301,13 +303,9 @@ function Dashboard() {
       console.log("License cracked reported:", selectedLicenseKey);
     } catch (error) {
       let errorMessage = error.message;
-      if (error.data && error.data.message) {
-        errorMessage = error.data.message;
-      } else if (error.reason) {
-        errorMessage = error.reason;
-      } else if (error.code === "CALL_EXCEPTION") {
-        errorMessage = "Transaction reverted: Check contract logic or license status";
-      }
+      if (error.data && error.data.message) errorMessage = error.data.message;
+      else if (error.reason) errorMessage = error.reason;
+      else if (error.code === "CALL_EXCEPTION") errorMessage = "Transaction reverted: Check contract logic or license status";
       setStatus(`Error reporting cracked: ${errorMessage}`);
       console.error("reportCracked error:", error);
     } finally {
@@ -330,37 +328,89 @@ function Dashboard() {
     return `${softwareName} #${sameNameCount} (${licenseKey.slice(0, 6)}...)`;
   };
 
+  // UI for non-registered users
+  if (!userStatus.isRegistered) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-pink-50 to-pink-100 flex items-center justify-center p-6">
+        <div className="bg-white rounded-3xl shadow-2xl p-12 w-full max-w-4xl transform transition-all hover:scale-105">
+          <h1 className="text-5xl font-extrabold text-center text-pink-800 mb-10">
+            Cracked Software Detector
+          </h1>
+          <p className="text-xl text-gray-700 mb-8 text-center">
+            Register to use the system. Your registration requires admin approval.
+          </p>
+          <button
+            onClick={registerUser}
+            className="w-full bg-gradient-to-r from-pink-500 to-rose-500 text-white text-xl py-4 px-8 rounded-xl hover:from-pink-600 hover:to-rose-600 focus:outline-none focus:ring-4 focus:ring-pink-400 transition-all duration-300 disabled:opacity-50 shadow-lg"
+            disabled={loading}
+          >
+            {loading ? (
+              <span className="flex items-center justify-center">
+                <svg className="animate-spin h-6 w-6 mr-3 text-white" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                </svg>
+                Processing...
+              </span>
+            ) : (
+              "Register"
+            )}
+          </button>
+          {status && (
+            <p className="text-xl text-gray-700 mt-6 text-center break-words">
+              <span className="font-semibold">Status:</span> {status}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // UI for pending or rejected users
+  if (!userStatus.isApproved) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-pink-50 to-pink-100 flex items-center justify-center p-6">
+        <div className="bg-white rounded-3xl shadow-2xl p-12 w-full max-w-4xl transform transition-all hover:scale-105">
+          <h1 className="text-5xl font-extrabold text-center text-pink-800 mb-10">
+            Cracked Software Detector
+          </h1>
+          {userStatus.isRejected ? (
+            <div className="text-center">
+              <p className="text-xl text-red-600 mb-8">
+                Your registration was rejected.
+              </p>
+              <p className="text-xl text-gray-700 mb-8 break-words">
+                <span className="font-semibold">Reason:</span> {userStatus.rejectionReason}
+              </p>
+            </div>
+          ) : (
+            <p className="text-xl text-gray-700 mb-8 text-center">
+              Your registration is pending admin approval.
+            </p>
+          )}
+          {status && (
+            <p className="text-xl text-gray-700 mt-6 text-center break-words">
+              <span className="font-semibold">Status:</span> {status}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Main UI for approved users
   return (
     <div className="min-h-screen bg-gradient-to-br from-pink-50 to-pink-100 flex items-center justify-center p-6">
-      {/* Enhanced: Light baby pink gradient background (from-pink-50 to-pink-100) */}
       <div className="bg-white rounded-3xl shadow-2xl p-12 w-full max-w-4xl transform transition-all hover:scale-105">
-        {/* Enhanced: Large container (max-w-4xl), rounded-3xl, hover scale animation */}
         <h1 className="text-5xl font-extrabold text-center text-pink-800 mb-10">
-          {/* Enhanced: Larger heading, pink-800 for theme consistency */}
           Cracked Software Detector
         </h1>
 
         {loading && (
           <div className="flex justify-center mb-8">
-            <svg
-              className="animate-spin h-8 w-8 text-pink-600"
-              viewBox="0 0 24 24"
-            >
-              {/* Enhanced: Pink spinner (text-pink-600) */}
-              <circle
-                className="opacity-25"
-                cx="12"
-                cy="12"
-                r="10"
-                stroke="currentColor"
-                strokeWidth="4"
-                fill="none"
-              />
-              <path
-                className="opacity-75"
-                fill="currentColor"
-                d="M4 12a8 8 0 018-8v8H4z"
-              />
+            <svg className="animate-spin h-8 w-8 text-pink-600" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
             </svg>
           </div>
         )}
@@ -373,7 +423,6 @@ function Dashboard() {
           className="block w-full text-xl text-gray-700 border border-pink-200 rounded-xl p-4 mb-8 focus:outline-none focus:ring-4 focus:ring-pink-300 transition-all"
           disabled={loading}
         />
-        {/* Enhanced: Larger text (text-xl), pink-200 border, pink-300 focus ring */}
 
         <select
           value={selectedLicenseKey}
@@ -386,20 +435,12 @@ function Dashboard() {
             const displayName = getDisplayName(softwareName, index, licenseKey);
             console.log("Rendering option:", { licenseKey, softwareName, displayName });
             return (
-              <option
-                key={licenseKey}
-                value={licenseKey}
-                title={licenseKey} // Enhanced: Tooltip for full license key
-              >
-                {displayName.length > 50
-                  ? `${displayName.slice(0, 47)}...`
-                  : displayName}
-                {/* Enhanced: Truncate long display names */}
+              <option key={licenseKey} value={licenseKey} title={licenseKey}>
+                {displayName.length > 50 ? `${displayName.slice(0, 47)}...` : displayName}
               </option>
             );
           })}
         </select>
-        {/* Enhanced: Larger select (text-xl, h-16), pink-200 border, pink-300 focus ring */}
 
         <input
           type="file"
@@ -407,7 +448,6 @@ function Dashboard() {
           className="block w-full text-lg text-gray-500 file:mr-6 file:py-4 file:px-8 file:rounded-full file:border-0 file:text-xl file:font-semibold file:bg-pink-100 file:text-pink-700 hover:file:bg-pink-200 mb-8"
           disabled={loading}
         />
-        {/* Enhanced: Larger file input button (text-xl, py-4, px-8), pink-100/pink-200 colors */}
 
         <div className="flex space-x-6 mb-10">
           <button
@@ -417,23 +457,9 @@ function Dashboard() {
           >
             {loading ? (
               <span className="flex items-center justify-center">
-                <svg
-                  className="animate-spin h-6 w-6 mr-3 text-white"
-                  viewBox="0 0 24 24"
-                >
-                  <circle
-                    className="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                  />
-                  <path
-                    className="opacity-75"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8v8H4z"
-                  />
+                <svg className="animate-spin h-6 w-6 mr-3 text-white" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
                 </svg>
                 Processing...
               </span>
@@ -448,23 +474,9 @@ function Dashboard() {
           >
             {loading ? (
               <span className="flex items-center justify-center">
-                <svg
-                  className="animate-spin h-6 w-6 mr-3 text-white"
-                  viewBox="0 0 24 24"
-                >
-                  <circle
-                    className="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                  />
-                  <path
-                    className="opacity-75"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8v8H4z"
-                  />
+                <svg className="animate-spin h-6 w-6 mr-3 text-white" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
                 </svg>
                 Processing...
               </span>
@@ -473,7 +485,6 @@ function Dashboard() {
             )}
           </button>
         </div>
-        {/* Enhanced: Pink-based gradient buttons (pink-500/rose-500, fuchsia-500/pink-600), larger text, hover animations, shadows */}
 
         <button
           onClick={reportCracked}
@@ -482,48 +493,29 @@ function Dashboard() {
         >
           {loading ? (
             <span className="flex items-center justify-center">
-              <svg
-                className="animate-spin h-6 w-6 mr-3 text-white"
-                viewBox="0 0 24 24"
-              >
-                <circle
-                  className="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                  />
-                  <path
-                    className="opacity-75"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8v8H4z"
-                  />
-                </svg>
-                Processing...
-              </span>
-            ) : (
-              "Report Cracked"
-            )}
-          </button>
-          {/* Enhanced: Full-width pink/red gradient button, larger text, hover animation, shadow */}
-  
-          <div className="mt-10 space-y-4">
-            <p className="text-xl text-gray-700 break-words">
-              <span className="font-semibold">Status:</span> {status}
-            </p>
-            <p
-              className="text-xl text-gray-700 break-all"
-              title={licenseKey} // Enhanced: Tooltip for full license key
-            >
-              <span className="font-semibold">License Key:</span>{" "}
-              {licenseKey ? `${licenseKey.slice(0, 20)}...` : ""}
-              {/* Enhanced: Truncate license key, wrap text */}
-            </p>
-          </div>
+              <svg className="animate-spin h-6 w-6 mr-3 text-white" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+              </svg>
+              Processing...
+            </span>
+          ) : (
+            "Report Cracked"
+          )}
+        </button>
+
+        <div className="mt-10 space-y-4">
+          <p className="text-xl text-gray-700 break-words">
+            <span className="font-semibold">Status:</span> {status}
+          </p>
+          <p className="text-xl text-gray-700 break-all" title={licenseKey}>
+            <span className="font-semibold">License Key:</span>{" "}
+            {licenseKey ? `${licenseKey.slice(0, 20)}...` : ""}
+          </p>
         </div>
       </div>
-    );
-  }
-  
-  export default Dashboard;
+    </div>
+  );
+}
+
+export default Dashboard;
