@@ -12,7 +12,7 @@ function Dashboard() {
   const [licenseKey, setLicenseKey] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const contractAddress = "0xb95f07573AbFdF176c4274D3a09E1801BFc9aA9b"; // Update with new deployed address
+  const contractAddress = "0xe84AC9f961bc601f0C396882BEFdB96987972581"; // Updated contract address
   const contractABI = LicenseManagerArtifact.abi;
 
   async function getContract() {
@@ -64,7 +64,6 @@ function Dashboard() {
               try {
                 const details = await contract.getLicenseDetails(key);
                 console.log(`Raw license details for ${key}:`, details);
-                // Try multiple ways to access softwareName
                 const softwareName =
                   details.softwareName ||
                   details.name ||
@@ -137,7 +136,6 @@ function Dashboard() {
         setLicenseKey(fileHash);
         console.log("Generated fileHash:", fileHash);
 
-        // Use user-provided softwareName
         const licenseName = softwareName.trim() || "Untitled License";
         console.log("User-provided softwareName:", softwareName);
         console.log("License name to be used:", licenseName);
@@ -146,7 +144,6 @@ function Dashboard() {
         await tx.wait();
         console.log("License issued transaction:", tx);
 
-        // Verify stored softwareName
         const license = await contract.getLicenseDetails(fileHash);
         console.log("Raw stored license details:", license);
         const storedName =
@@ -334,16 +331,36 @@ function Dashboard() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-gray-100 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-xl p-8 w-full max-w-lg">
-        <h1 className="text-3xl font-bold text-center text-gray-800 mb-6">
+    <div className="min-h-screen bg-gradient-to-br from-pink-50 to-pink-100 flex items-center justify-center p-6">
+      {/* Enhanced: Light baby pink gradient background (from-pink-50 to-pink-100) */}
+      <div className="bg-white rounded-3xl shadow-2xl p-12 w-full max-w-4xl transform transition-all hover:scale-105">
+        {/* Enhanced: Large container (max-w-4xl), rounded-3xl, hover scale animation */}
+        <h1 className="text-5xl font-extrabold text-center text-pink-800 mb-10">
+          {/* Enhanced: Larger heading, pink-800 for theme consistency */}
           Cracked Software Detector
         </h1>
 
         {loading && (
-          <div className="flex justify-center mb-4">
-            <svg className="animate-spin h-6 w-6 text-blue-600" viewBox="0 0 24 24">
-              <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+          <div className="flex justify-center mb-8">
+            <svg
+              className="animate-spin h-8 w-8 text-pink-600"
+              viewBox="0 0 24 24"
+            >
+              {/* Enhanced: Pink spinner (text-pink-600) */}
+              <circle
+                className="opacity-25"
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                strokeWidth="4"
+                fill="none"
+              />
+              <path
+                className="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8v8H4z"
+              />
             </svg>
           </div>
         )}
@@ -353,14 +370,15 @@ function Dashboard() {
           value={softwareName}
           onChange={(e) => setSoftwareName(e.target.value)}
           placeholder="Enter software name for license"
-          className="block w-full text-lg text-gray-700 border border-gray-300 rounded-lg p-3 mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500 transition"
+          className="block w-full text-xl text-gray-700 border border-pink-200 rounded-xl p-4 mb-8 focus:outline-none focus:ring-4 focus:ring-pink-300 transition-all"
           disabled={loading}
         />
+        {/* Enhanced: Larger text (text-xl), pink-200 border, pink-300 focus ring */}
 
         <select
           value={selectedLicenseKey}
           onChange={(e) => setSelectedLicenseKey(e.target.value)}
-          className="block w-full text-lg text-gray-700 border border-gray-300 rounded-lg p-3 mb-4 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition"
+          className="block w-full text-xl text-gray-700 border border-pink-200 rounded-xl p-4 mb-8 h-16 bg-white focus:outline-none focus:ring-4 focus:ring-pink-300 transition-all"
           disabled={loading}
         >
           <option value="">Select a Software License</option>
@@ -368,56 +386,144 @@ function Dashboard() {
             const displayName = getDisplayName(softwareName, index, licenseKey);
             console.log("Rendering option:", { licenseKey, softwareName, displayName });
             return (
-              <option key={licenseKey} value={licenseKey}>
-                {displayName}
+              <option
+                key={licenseKey}
+                value={licenseKey}
+                title={licenseKey} // Enhanced: Tooltip for full license key
+              >
+                {displayName.length > 50
+                  ? `${displayName.slice(0, 47)}...`
+                  : displayName}
+                {/* Enhanced: Truncate long display names */}
               </option>
             );
           })}
         </select>
+        {/* Enhanced: Larger select (text-xl, h-16), pink-200 border, pink-300 focus ring */}
 
         <input
           type="file"
           onChange={(e) => setFile(e.target.files[0])}
-          className="block w-full text-lg text-gray-500 file:mr-4 file:py-3 file:px-6 file:rounded-full file:border-0 file:text-lg file:font-semibold file:bg-blue-100 file:text-blue-700 hover:file:bg-blue-200 mb-4"
+          className="block w-full text-lg text-gray-500 file:mr-6 file:py-4 file:px-8 file:rounded-full file:border-0 file:text-xl file:font-semibold file:bg-pink-100 file:text-pink-700 hover:file:bg-pink-200 mb-8"
           disabled={loading}
         />
+        {/* Enhanced: Larger file input button (text-xl, py-4, px-8), pink-100/pink-200 colors */}
 
-        <div className="flex space-x-4 mb-6">
+        <div className="flex space-x-6 mb-10">
           <button
             onClick={generateAndStoreLicense}
-            className="flex-1 bg-blue-600 text-white text-lg py-3 px-6 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 transition disabled:opacity-50"
+            className="flex-1 bg-gradient-to-r from-pink-500 to-rose-500 text-white text-xl py-4 px-8 rounded-xl hover:from-pink-600 hover:to-rose-600 focus:outline-none focus:ring-4 focus:ring-pink-400 transition-all duration-300 disabled:opacity-50 shadow-lg"
             disabled={loading}
           >
-            {loading ? "Processing..." : "Generate & Store License"}
+            {loading ? (
+              <span className="flex items-center justify-center">
+                <svg
+                  className="animate-spin h-6 w-6 mr-3 text-white"
+                  viewBox="0 0 24 24"
+                >
+                  <circle
+                    className="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                  />
+                  <path
+                    className="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8v8H4z"
+                  />
+                </svg>
+                Processing...
+              </span>
+            ) : (
+              "Generate & Store License"
+            )}
           </button>
           <button
             onClick={checkAuthenticity}
-            className="flex-1 bg-green-600 text-white text-lg py-3 px-6 rounded-lg hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 transition disabled:opacity-50"
+            className="flex-1 bg-gradient-to-r from-fuchsia-500 to-pink-600 text-white text-xl py-4 px-8 rounded-xl hover:from-fuchsia-600 hover:to-pink-700 focus:outline-none focus:ring-4 focus:ring-fuchsia-400 transition-all duration-300 disabled:opacity-50 shadow-lg"
             disabled={loading}
           >
-            {loading ? "Processing..." : "Check Authenticity"}
+            {loading ? (
+              <span className="flex items-center justify-center">
+                <svg
+                  className="animate-spin h-6 w-6 mr-3 text-white"
+                  viewBox="0 0 24 24"
+                >
+                  <circle
+                    className="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                  />
+                  <path
+                    className="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8v8H4z"
+                  />
+                </svg>
+                Processing...
+              </span>
+            ) : (
+              "Check Authenticity"
+            )}
           </button>
         </div>
+        {/* Enhanced: Pink-based gradient buttons (pink-500/rose-500, fuchsia-500/pink-600), larger text, hover animations, shadows */}
 
         <button
           onClick={reportCracked}
-          className="w-full bg-red-600 text-white text-lg py-3 px-6 rounded-lg hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 transition disabled:opacity-50"
+          className="w-full bg-gradient-to-r from-red-500 to-pink-500 text-white text-xl py-4 px-8 rounded-xl hover:from-red-600 hover:to-pink-600 focus:outline-none focus:ring-4 focus:ring-red-400 transition-all duration-300 disabled:opacity-50 shadow-lg"
           disabled={loading || !selectedLicenseKey}
         >
-          {loading ? "Processing..." : "Report Cracked"}
-        </button>
-
-        <div className="mt-6">
-          <p className="text-gray-700 text-lg">
-            <span className="font-semibold">Status:</span> {status}
-          </p>
-          <p className="text-gray-700 text-lg break-all">
-            <span className="font-semibold">License Key:</span> {licenseKey}
-          </p>
+          {loading ? (
+            <span className="flex items-center justify-center">
+              <svg
+                className="animate-spin h-6 w-6 mr-3 text-white"
+                viewBox="0 0 24 24"
+              >
+                <circle
+                  className="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                  />
+                  <path
+                    className="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8v8H4z"
+                  />
+                </svg>
+                Processing...
+              </span>
+            ) : (
+              "Report Cracked"
+            )}
+          </button>
+          {/* Enhanced: Full-width pink/red gradient button, larger text, hover animation, shadow */}
+  
+          <div className="mt-10 space-y-4">
+            <p className="text-xl text-gray-700 break-words">
+              <span className="font-semibold">Status:</span> {status}
+            </p>
+            <p
+              className="text-xl text-gray-700 break-all"
+              title={licenseKey} // Enhanced: Tooltip for full license key
+            >
+              <span className="font-semibold">License Key:</span>{" "}
+              {licenseKey ? `${licenseKey.slice(0, 20)}...` : ""}
+              {/* Enhanced: Truncate license key, wrap text */}
+            </p>
+          </div>
         </div>
       </div>
-    </div>
-  );
-}
-
-export default Dashboard;
+    );
+  }
+  
+  export default Dashboard;
