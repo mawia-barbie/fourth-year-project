@@ -2,12 +2,9 @@
 pragma solidity ^0.8.28;
 
 contract LicenseManager {
-    mapping(address => string[]) public userLicenses;
+    address public admin;
 
-    event LicenseIssued(address indexed user, string licenseKey, string softwareName);
-    event LicenseTampered(string licenseKey, address reporter);
-    event LicenseCracked(string licenseKey, address reporter);
-
+    // Existing License struct
     struct License {
         string softwareName;
         bool exists;
@@ -15,12 +12,50 @@ contract LicenseManager {
         bool isCracked;
     }
 
-    mapping(string => License) public licenses;
+    // New Software struct
+    struct Software {
+        string hash;
+        bool isApproved;
+        address developer;
+    }
 
-    constructor() {}
+    mapping(address => string[]) public userLicenses;
+    mapping(string => License) public licenses;
+    mapping(string => Software) public softwareRecords;
+
+    event LicenseIssued(address indexed user, string licenseKey, string softwareName);
+    event LicenseTampered(string licenseKey, address reporter);
+    event LicenseCracked(string licenseKey, address reporter);
+    event SoftwareAdded(string hash, address developer);
+    event SoftwareApproved(string hash);
+
+    constructor() {
+        admin = msg.sender;
+    }
+
+    modifier onlyAdmin() {
+        require(msg.sender == admin, "Only admin can perform this action");
+        _;
+    }
+
+    function addSoftware(string calldata hash, address developer) external onlyAdmin {
+        require(bytes(softwareRecords[hash].hash).length == 0, "Software already exists");
+        softwareRecords[hash] = Software(hash, false, developer);
+        emit SoftwareAdded(hash, developer);
+    }
+
+    function approveSoftware(string calldata hash) external onlyAdmin {
+        require(bytes(softwareRecords[hash].hash).length != 0, "Software does not exist");
+        softwareRecords[hash].isApproved = true;
+        emit SoftwareApproved(hash);
+    }
 
     function issueLicense(string calldata licenseKey, string calldata softwareName) external {
         require(!licenses[licenseKey].exists, "License already exists");
+        require(bytes(softwareRecords[licenseKey].hash).length != 0, "Software not registered");
+        require(softwareRecords[licenseKey].isApproved, "Software not approved");
+        require(msg.sender == softwareRecords[licenseKey].developer, "Only developer can issue license");
+        
         licenses[licenseKey] = License(softwareName, true, false, false);
         userLicenses[msg.sender].push(licenseKey);
         emit LicenseIssued(msg.sender, licenseKey, softwareName);
