@@ -29,7 +29,7 @@ const UserDashboard = () => {
   const maxRetries = 3;
   const retryDelay = 5000;
 
-  const contractAddress = ' 0x235D5aA50CC82f2eA8BaAd7CcABc5d0979ad863C'; // Update with actual deployed address
+  const contractAddress = '0x235D5aA50CC82f2eA8BaAd7CcABc5d0979ad863C';
   const contractABI = LicenseManagerArtifact.abi;
   const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -80,6 +80,10 @@ const UserDashboard = () => {
     }
 
     try {
+      if (!ethers.isAddress(contractAddress)) {
+        throw new Error(`Invalid contract address: ${contractAddress}`);
+      }
+
       const provider = new ethers.BrowserProvider(window.ethereum, {
         chainId: 1337,
         name: 'ganache',
@@ -88,6 +92,9 @@ const UserDashboard = () => {
 
       const signer = await provider.getSigner();
       const signerAddress = await signer.getAddress();
+      if (!ethers.isAddress(signerAddress)) {
+        throw new Error(`Invalid signer address: ${signerAddress}`);
+      }
       console.log('Signer address:', signerAddress);
 
       const network = await provider.getNetwork();
@@ -211,6 +218,9 @@ const UserDashboard = () => {
       try {
         const { contract, signer } = contractData;
         const signerAddress = await signer.getAddress();
+        if (!ethers.isAddress(signerAddress)) {
+          throw new Error(`Invalid signer address: ${signerAddress}`);
+        }
         console.log('Fetching licenses for address:', signerAddress);
         const licenseKeys = await contract.getUserLicenses(signerAddress);
         console.log('Fetched license keys:', licenseKeys);
@@ -256,7 +266,9 @@ const UserDashboard = () => {
         setRejectedSoftware(rejectedRes.data.rejected_software || []);
         setAllApprovedSoftware(allApprovedRes.data.all_approved_software || []);
       } catch (err) {
-        if (err.response?.status === 401) {
+        if (err.code === 'UNSUPPORTED_OPERATION' && err.operation === 'getEnsAddress') {
+          setError('ENS is not supported on this network. Please ensure all addresses are valid.');
+        } else if (err.response?.status === 401) {
           localStorage.removeItem('token');
           navigate('/login');
         } else {
@@ -277,20 +289,32 @@ const UserDashboard = () => {
       const { contract } = contractData;
       console.log('Setting up event listeners');
       contract.on('SoftwareAdded', (hash, developer) => {
+        if (!ethers.isAddress(developer)) {
+          console.warn('Invalid developer address in SoftwareAdded event:', developer);
+        }
         setSuccess(`Software ${hash} added to blockchain`);
         fetchData();
         console.log('SoftwareAdded event:', { hash, developer });
       });
       contract.on('LicenseIssued', (licenseKey, owner, softwareHash) => {
+        if (!ethers.isAddress(owner)) {
+          console.warn('Invalid owner address in LicenseIssued event:', owner);
+        }
         setSuccess(`License ${licenseKey} issued for software ${softwareHash}`);
         fetchData();
         console.log('LicenseIssued event:', { licenseKey, owner, softwareHash });
       });
       contract.on('LicenseTampered', (licenseKey, reporter) => {
+        if (!ethers.isAddress(reporter)) {
+          console.warn('Invalid reporter address in LicenseTampered event:', reporter);
+        }
         setStatus(`Alert: Document with license ${licenseKey} has been tampered!`);
         console.log('LicenseTampered event:', { licenseKey, reporter });
       });
       contract.on('LicenseCracked', (licenseKey, reporter) => {
+        if (!ethers.isAddress(reporter)) {
+          console.warn('Invalid reporter address in LicenseCracked event:', reporter);
+        }
         setStatus(`Alert: Document with license ${licenseKey} has been cracked!`);
         console.log('LicenseCracked event:', { licenseKey, reporter });
       });
@@ -314,7 +338,6 @@ const UserDashboard = () => {
 
   // Upload software and add to blockchain
   async function handleSoftwareUpload() {
-    // Validate inputs
     if (!file || !softwareName.trim() || !softwareVersion.trim()) {
       setError('Please provide a valid software name, version, and file');
       console.warn('Validation failed: Missing name, version, or file');
@@ -330,13 +353,11 @@ const UserDashboard = () => {
     setError('');
     setSuccess('');
 
-    // Construct FormData
     const formData = new FormData();
     formData.append('name', softwareName.trim());
     formData.append('version', softwareVersion.trim());
     formData.append('file', file);
 
-    // Log FormData entries for debugging
     console.log('Uploading software:', { name: softwareName, version: softwareVersion, fileName: file.name });
     for (let [key, value] of formData.entries()) {
       console.log(`FormData entry: ${key}=${value instanceof File ? value.name : value}`);
@@ -359,6 +380,10 @@ const UserDashboard = () => {
       console.log('Software upload successful:', response.data);
 
       const { contract, address } = contractData;
+      if (!ethers.isAddress(address)) {
+        throw new Error(`Invalid address for addSoftware: ${address}`);
+      }
+      console.log('Calling addSoftware with:', { fileHash, address });
       const tx = await contract.addSoftware(fileHash, address, { gasLimit: 500000 });
       await tx.wait();
       setSuccess('Software added to blockchain successfully');
@@ -382,7 +407,9 @@ const UserDashboard = () => {
       setAllApprovedSoftware(allApprovedRes.data.all_approved_software || []);
     } catch (err) {
       let errorMessage = 'Error uploading software';
-      if (err.response?.data?.detail) {
+      if (err.code === 'UNSUPPORTED_OPERATION' && err.operation === 'getEnsAddress') {
+        errorMessage = 'ENS is not supported on this network. Please ensure all addresses are valid.';
+      } else if (err.response?.data?.detail) {
         console.log('FastAPI error response:', err.response.data.detail);
         if (Array.isArray(err.response.data.detail)) {
           errorMessage = err.response.data.detail.map((e) => e.msg).join('; ');
@@ -444,6 +471,9 @@ const UserDashboard = () => {
       setSuccess(`License issued: ${fileHash} (Name: ${licenseName})`);
 
       const signerAddress = await signer.getAddress();
+      if (!ethers.isAddress(signerAddress)) {
+        throw new Error(`Invalid signer address: ${signerAddress}`);
+      }
       const licenseKeys = await contract.getUserLicenses(signerAddress);
       const licenses = await Promise.all(
         licenseKeys.map(async (key) => {
@@ -458,8 +488,13 @@ const UserDashboard = () => {
       setFile(null);
     } catch (err) {
       let errorMessage = err.message;
-      if (err.data && err.data.message) errorMessage = err.data.message;
-      else if (err.reason) errorMessage = err.reason;
+      if (err.code === 'UNSUPPORTED_OPERATION' && err.operation === 'getEnsAddress') {
+        errorMessage = 'ENS is not supported on this network. Please ensure all addresses are valid.';
+      } else if (err.data && err.data.message) {
+        errorMessage = err.data.message;
+      } else if (err.reason) {
+        errorMessage = err.reason;
+      }
       setError(`Error issuing license: ${errorMessage}`);
       console.error('generateAndStoreLicense error:', err);
     } finally {
@@ -529,7 +564,11 @@ const UserDashboard = () => {
           }
         }
       } catch (err) {
-        setError(`Error checking authenticity: ${err.message}`);
+        let errorMessage = err.message;
+        if (err.code === 'UNSUPPORTED_OPERATION' && err.operation === 'getEnsAddress') {
+          errorMessage = 'ENS is not supported on this network. Please ensure all addresses are valid.';
+        }
+        setError(`Error checking authenticity: ${errorMessage}`);
         console.error('checkAuthenticity error:', err);
       } finally {
         setLoading(false);
@@ -575,9 +614,15 @@ const UserDashboard = () => {
       console.log('License cracked reported:', selectedLicenseKey);
     } catch (err) {
       let errorMessage = err.message;
-      if (err.data && err.data.message) errorMessage = err.data.message;
-      else if (err.reason) errorMessage = err.reason;
-      else if (err.code === 'CALL_EXCEPTION') errorMessage = 'Transaction reverted: Check contract logic or license status';
+      if (err.code === 'UNSUPPORTED_OPERATION' && err.operation === 'getEnsAddress') {
+        errorMessage = 'ENS is not supported on this network. Please ensure all addresses are valid.';
+      } else if (err.data && err.data.message) {
+        errorMessage = err.data.message;
+      } else if (err.reason) {
+        errorMessage = err.reason;
+      } else if (err.code === 'CALL_EXCEPTION') {
+        errorMessage = 'Transaction reverted: Check contract logic or license status';
+      }
       setError(`Error reporting cracked: ${errorMessage}`);
       console.error('reportCracked error:', err);
     } finally {
@@ -621,7 +666,9 @@ const UserDashboard = () => {
       setAllApprovedSoftware(allApprovedRes.data.all_approved_software || []);
     } catch (err) {
       let errorMessage = 'Error approving software';
-      if (err.response?.data?.detail) {
+      if (err.code === 'UNSUPPORTED_OPERATION' && err.operation === 'getEnsAddress') {
+        errorMessage = 'ENS is not supported on this network. Please ensure all addresses are valid.';
+      } else if (err.response?.data?.detail) {
         if (Array.isArray(err.response.data.detail)) {
           errorMessage = err.response.data.detail.map((e) => e.msg).join('; ');
         } else {
@@ -673,7 +720,9 @@ const UserDashboard = () => {
       setAllApprovedSoftware(allApprovedRes.data.all_approved_software || []);
     } catch (err) {
       let errorMessage = 'Error rejecting software';
-      if (err.response?.data?.detail) {
+      if (err.code === 'UNSUPPORTED_OPERATION' && err.operation === 'getEnsAddress') {
+        errorMessage = 'ENS is not supported on this network. Please ensure all addresses are valid.';
+      } else if (err.response?.data?.detail) {
         if (Array.isArray(err.response.data.detail)) {
           errorMessage = err.response.data.detail.map((e) => e.msg).join('; ');
         } else {
