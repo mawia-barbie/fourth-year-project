@@ -10,14 +10,15 @@ class User(Base):
     role = Column(String, default="user")  # 'user' or 'admin'
     is_approved = Column(Boolean, default=False)  # Admin approval status
     created_at = Column(DateTime, default=func.now())
+    address = Column(String, nullable=True)  # Add address field for blockchain wallet
+
 
 class Software(Base):
     __tablename__ = "software"
-
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)
-    version = Column(String, nullable=False)
-    hash = Column(String, unique=True, nullable=False)
-    developer_email = Column(String, nullable=False)
+    name = Column(String, index=True)
+    version = Column(String)
+    hash = Column(String, unique=True, index=True)
+    developer_email = Column(String, index=True)
     is_approved = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=func.now())
+    is_rejected = Column(Boolean, default=False)

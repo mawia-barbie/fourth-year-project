@@ -20,7 +20,7 @@ const Login = () => {
     setLoading(true);
 
     try {
-      const response = await axios.post(`${API_URL}/login`, { email, password });
+      const response = await axios.post(`${API_URL}/users/login`, { email, password });
       setSuccess(response.data.message);
       setShowOtp(true);
     } catch (err) {
@@ -44,7 +44,7 @@ const Login = () => {
     }
 
     try {
-      const response = await axios.post(`${API_URL}/verify-otp`, { email, otp });
+      const response = await axios.post(`${API_URL}/users/verify-otp`, { email, otp });
       const { access_token, role } = response.data;
       if (!access_token || !role) {
         throw new Error('Invalid response from server');
@@ -73,7 +73,7 @@ const Login = () => {
     setLoading(true);
 
     try {
-      const response = await axios.post(`${API_URL}/login`, { email });
+      const response = await axios.post(`${API_URL}/users/login`, { email });
       setSuccess('OTP resent to your email');
     } catch (err) {
       console.error('Resend OTP error:', err);

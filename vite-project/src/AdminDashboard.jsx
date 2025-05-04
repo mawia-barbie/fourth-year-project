@@ -1,6 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { ethers } from 'ethers';
 import axios from 'axios';
+import LicenseManagerArtifact from './LicenseManager.json';
 
 const AdminDashboard = () => {
   const [activeTab, setActiveTab] = useState('users');
@@ -11,15 +13,179 @@ const AdminDashboard = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [contractData, setContractData] = useState(null);
+  const [isConnected, setIsConnected] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(true);
+  const connectionLock = useRef(false);
   const navigate = useNavigate();
   const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+  const contractAddress = ' 0x235D5aA50CC82f2eA8BaAd7CcABc5d0979ad863C '; // Update with actual deployed address
+  const contractABI = LicenseManagerArtifact.abi;
+  const maxRetries = 3;
+  const retryDelay = 5000;
 
-  // Check if token exists and attempt to fetch data to validate admin access
-  useEffect(() => {
-    const token = localStorage.getItem('token');
-    if (!token) {
-      navigate('/login');
+  // Connect to MetaMask
+  async function connectWallet(retryCount = 0) {
+    if (connectionLock.current) {
+      console.log('Connection already in progress, waiting...');
+      return null;
     }
+
+    if (!window.ethereum) {
+      setError('Please install MetaMask!');
+      console.error('MetaMask not detected');
+      return null;
+    }
+
+    connectionLock.current = true;
+    try {
+      console.log(`Attempting eth_requestAccounts (retry ${retryCount})`);
+      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      if (accounts.length === 0) {
+        setError('No accounts found. Please connect an account in MetaMask.');
+        console.warn('No accounts returned by MetaMask');
+        return null;
+      }
+      console.log('Connected accounts:', accounts);
+      return accounts;
+    } catch (err) {
+      if (err.code === -32002 && retryCount < maxRetries) {
+        console.warn(`Retrying eth_requestAccounts (attempt ${retryCount + 1})...`);
+        await new Promise((resolve) => setTimeout(resolve, retryDelay));
+        return connectWallet(retryCount + 1);
+      }
+      setError(`Error connecting to MetaMask: ${err.message}`);
+      console.error('connectWallet error:', err);
+      return null;
+    } finally {
+      connectionLock.current = false;
+    }
+  }
+
+  // Initialize contract
+  async function initializeContract() {
+    console.log('Initializing contract...');
+    const accounts = await connectWallet();
+    if (!accounts) {
+      return null;
+    }
+
+    try {
+      const provider = new ethers.BrowserProvider(window.ethereum, {
+        chainId: 1337,
+        name: 'ganache',
+        ensAddress: null,
+      });
+
+      const signer = await provider.getSigner();
+      const signerAddress = await signer.getAddress();
+      console.log('Signer address:', signerAddress);
+
+      const network = await provider.getNetwork();
+      if (Number(network.chainId) !== 1337) {
+        setError('Please connect MetaMask to Ganache (chainId 1337)');
+        console.warn('Incorrect network, expected chainId 1337, got:', network.chainId);
+        return null;
+      }
+
+      const contract = new ethers.Contract(contractAddress, contractABI, signer);
+      console.log('Contract initialized successfully');
+      return { contract, signer, address: signerAddress };
+    } catch (err) {
+      setError(`Error initializing contract: ${err.message}`);
+      console.error('initializeContract error:', err);
+      return null;
+    }
+  }
+
+  // Auto-connect to MetaMask and validate admin access
+  useEffect(() => {
+    async function autoConnect() {
+      const token = localStorage.getItem('token');
+      if (!token) {
+        navigate('/login');
+        return;
+      }
+
+      if (!window.ethereum) {
+        setError('Please install MetaMask!');
+        console.error('MetaMask not detected');
+        setIsConnecting(false);
+        return;
+      }
+
+      try {
+        console.log('Checking for existing MetaMask connection...');
+        const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+        console.log('Existing accounts check:', accounts);
+        if (accounts.length > 0) {
+          console.log('Existing MetaMask connection found:', accounts);
+          const data = await initializeContract();
+          if (data) {
+            setContractData(data);
+            setIsConnected(true);
+            setSuccess('Connected to MetaMask');
+            // Update user address in backend
+            await axios.patch(
+              `${API_URL}/users/update-address`,
+              { address: data.address },
+              { headers: { Authorization: `Bearer ${token}` } }
+            );
+            // Verify admin role
+            const userResponse = await axios.get(`${API_URL}/users/me`, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            if (userResponse.data.role !== 'admin') {
+              navigate('/dashboard');
+            }
+          } else {
+            setError('Failed to initialize contract. Please try again.');
+          }
+        } else {
+          console.log('No existing connection, attempting to connect...');
+          const data = await initializeContract();
+          if (data) {
+            setContractData(data);
+            setIsConnected(true);
+            setSuccess('Connected to MetaMask');
+            await axios.patch(
+              `${API_URL}/users/update-address`,
+              { address: data.address },
+              { headers: { Authorization: `Bearer ${token}` } }
+            );
+            const userResponse = await axios.get(`${API_URL}/users/me`, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            if (userResponse.data.role !== 'admin') {
+              navigate('/dashboard');
+            }
+          } else {
+            setError('Failed to connect to MetaMask. Please try again.');
+          }
+        }
+      } catch (err) {
+        console.error('Auto-connect error:', err);
+        if (err.response?.status === 401) {
+          localStorage.removeItem('token');
+          navigate('/login');
+        } else if (err.response?.status === 403) {
+          navigate('/dashboard');
+        } else {
+          setError(`Error connecting to MetaMask: ${err.message}`);
+        }
+      } finally {
+        setIsConnecting(false);
+      }
+    }
+
+    autoConnect();
+
+    return () => {
+      if (contractData?.contract) {
+        console.log('Cleaning up contract event listeners');
+        contractData.contract.removeAllListeners();
+      }
+    };
   }, [navigate]);
 
   // Fetch pending users
@@ -28,22 +194,19 @@ const AdminDashboard = () => {
     setError('');
     try {
       const token = localStorage.getItem('token');
-      console.log('Token:', token); // Debug: Log the token
       if (!token) {
         throw new Error('No token found');
       }
       const response = await axios.get(`${API_URL}/admin/pending-users`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      console.log('Pending users response:', response.data); // Debug: Log response
       setPendingUsers(response.data.pending_users || []);
     } catch (err) {
-      console.error('Fetch error:', err); // Debug: Log full error
       if (err.response?.status === 401) {
         localStorage.removeItem('token');
         navigate('/login');
       } else if (err.response?.status === 403) {
-        navigate('/dashboard'); // Redirect non-admins to dashboard
+        navigate('/dashboard');
       } else {
         setError(err.response?.data?.detail || 'Failed to fetch pending users');
       }
@@ -58,22 +221,19 @@ const AdminDashboard = () => {
     setError('');
     try {
       const token = localStorage.getItem('token');
-      console.log('Token:', token); // Debug: Log token
       if (!token) {
         throw new Error('No token found');
       }
       const response = await axios.get(`${API_URL}/admin/pending-software`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      console.log('Pending software response:', response.data); // Debug: Log response
       setPendingSoftware(response.data.pending_software || []);
     } catch (err) {
-      console.error('Fetch error:', err); // Debug: Log full error
       if (err.response?.status === 401) {
         localStorage.removeItem('token');
         navigate('/login');
       } else if (err.response?.status === 403) {
-        navigate('/dashboard'); // Redirect non-admins to dashboard
+        navigate('/dashboard');
       } else {
         setError(err.response?.data?.detail || 'Failed to fetch pending software');
       }
@@ -82,16 +242,42 @@ const AdminDashboard = () => {
     }
   };
 
+  // Setup event listeners
+  useEffect(() => {
+    async function setupEventListeners() {
+      if (!contractData) return;
+      const { contract } = contractData;
+      console.log('Setting up event listeners');
+      contract.on('SoftwareApproved', (hash) => {
+        setSuccess(`Software ${hash} approved on blockchain`);
+        fetchPendingSoftware();
+        console.log('SoftwareApproved event:', { hash });
+      });
+      contract.on('SoftwareRejected', (hash) => {
+        setSuccess(`Software ${hash} rejected on blockchain`);
+        fetchPendingSoftware();
+        console.log('SoftwareRejected event:', { hash });
+      });
+    }
+
+    if (contractData) {
+      setupEventListeners();
+    }
+  }, [contractData]);
+
   // Handle user approval
   const handleApproveUser = async (email) => {
     if (!window.confirm(`Are you sure you want to approve ${email}?`)) return;
     setLoading(true);
     setError('');
+    setSuccess('');
     try {
       const token = localStorage.getItem('token');
-      await axios.post(`${API_URL}/admin/approve-user/${email}`, {}, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      await axios.post(
+        `${API_URL}/admin/approve-user/${email}`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
       setPendingUsers(pendingUsers.filter((user) => user.email !== email));
       setSuccess(`User ${email} approved successfully`);
     } catch (err) {
@@ -106,11 +292,14 @@ const AdminDashboard = () => {
     if (!window.confirm(`Are you sure you want to reject ${email}?`)) return;
     setLoading(true);
     setError('');
+    setSuccess('');
     try {
       const token = localStorage.getItem('token');
-      await axios.post(`${API_URL}/admin/reject-user/${email}`, {}, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      await axios.post(
+        `${API_URL}/admin/reject-user/${email}`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
       setPendingUsers(pendingUsers.filter((user) => user.email !== email));
       setSuccess(`User ${email} rejected successfully`);
     } catch (err) {
@@ -122,18 +311,31 @@ const AdminDashboard = () => {
 
   // Handle software approval
   const handleApproveSoftware = async (hash) => {
-    if (!window.confirm(`Are you sure you want to approve this software?`)) return;
+    if (!window.confirm(`Are you sure you want to approve software with hash ${hash}?`)) return;
+    if (!contractData) {
+      setError('Not connected to MetaMask. Please try again.');
+      return;
+    }
     setLoading(true);
     setError('');
+    setSuccess('');
     try {
       const token = localStorage.getItem('token');
-      await axios.post(`${API_URL}/admin/approve-software/${hash}`, {}, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const { contract } = contractData;
+      // Call backend API
+      await axios.post(
+        `${API_URL}/admin/approve-software/${hash}`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      // Call smart contract
+      const tx = await contract.approveSoftware(hash, { gasLimit: 300000 });
+      await tx.wait();
       setPendingSoftware(pendingSoftware.filter((item) => item.hash !== hash));
-      setSuccess('Software approved successfully');
+      setSuccess(`Software ${hash} approved successfully`);
     } catch (err) {
-      setError(err.response?.data?.detail || `Failed to approve software with hash ${hash}`);
+      setError(err.response?.data?.detail || `Failed to approve software: ${err.message}`);
+      console.error('approveSoftware error:', err);
     } finally {
       setLoading(false);
     }
@@ -141,18 +343,31 @@ const AdminDashboard = () => {
 
   // Handle software rejection
   const handleRejectSoftware = async (hash) => {
-    if (!window.confirm(`Are you sure you want to reject this software?`)) return;
+    if (!window.confirm(`Are you sure you want to reject software with hash ${hash}?`)) return;
+    if (!contractData) {
+      setError('Not connected to MetaMask. Please try again.');
+      return;
+    }
     setLoading(true);
     setError('');
+    setSuccess('');
     try {
       const token = localStorage.getItem('token');
-      await axios.post(`${API_URL}/admin/reject-software/${hash}`, {}, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const { contract } = contractData;
+      // Call backend API
+      await axios.post(
+        `${API_URL}/admin/reject-software/${hash}`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      // Call smart contract
+      const tx = await contract.rejectSoftware(hash, { gasLimit: 300000 });
+      await tx.wait();
       setPendingSoftware(pendingSoftware.filter((item) => item.hash !== hash));
-      setSuccess('Software rejected successfully');
+      setSuccess(`Software ${hash} rejected successfully`);
     } catch (err) {
-      setError(err.response?.data?.detail || `Failed to reject software with hash ${hash}`);
+      setError(err.response?.data?.detail || `Failed to reject software: ${err.message}`);
+      console.error('rejectSoftware error:', err);
     } finally {
       setLoading(false);
     }
@@ -164,7 +379,6 @@ const AdminDashboard = () => {
     setError('');
     setSuccess('');
     setLoading(true);
-
     try {
       const token = localStorage.getItem('token');
       const response = await axios.post(
@@ -184,217 +398,261 @@ const AdminDashboard = () => {
 
   // Fetch data when tab changes
   useEffect(() => {
+    if (!isConnected) return;
     if (activeTab === 'users') {
       fetchPendingUsers();
     } else if (activeTab === 'software') {
       fetchPendingSoftware();
     }
-  }, [activeTab]);
+  }, [activeTab, isConnected]);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-pink-50 to-pink-100 p-6">
-      <div className="max-w-6xl mx-auto bg-white rounded-3xl shadow-2xl p-8">
+    <div className="min-h-screen bg-gradient-to-br from-pink-50 to-pink-100 flex items-center justify-center p-6 relative">
+      {isConnecting && (
+        <div className="fixed inset-0 bg-gray-800 bg-opacity-75 flex items-center justify-center z-50">
+          <div className="text-center">
+            <div className="flex justify-center mb-8">
+              <svg className="animate-spin h-12 w-12 text-pink-600" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+              </svg>
+            </div>
+            <p className="text-2xl text-white">Connecting to MetaMask...</p>
+          </div>
+        </div>
+      )}
+      <div
+        className={`bg-white rounded-3xl shadow-2xl p-12 w-full max-w-6xl transform transition-all hover:scale-105 ${
+          isConnecting ? 'opacity-0' : 'opacity-100'
+        }`}
+      >
         <div className="flex justify-between items-center mb-8">
-          <h2 className="text-3xl font-extrabold text-pink-800">Admin Dashboard</h2>
+          <h2 className="text-5xl font-extrabold text-center text-pink-800">Admin Dashboard</h2>
           <button
             onClick={() => {
               localStorage.removeItem('token');
               navigate('/login');
             }}
-            className="bg-red-500 text-white px-4 py-2 rounded-xl hover:bg-red-600 transition-all"
+            className="bg-red-500 text-white px-6 py-3 rounded-xl hover:bg-red-600 transition-all"
           >
             Logout
           </button>
         </div>
-        <div className="flex mb-6">
-          <button
-            onClick={() => setActiveTab('users')}
-            className={`px-6 py-3 text-lg font-semibold rounded-t-xl transition-all ${
-              activeTab === 'users'
-                ? 'bg-pink-500 text-white'
-                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-            }`}
-          >
-            Pending Users
-          </button>
-          <button
-            onClick={() => setActiveTab('software')}
-            className={`px-6 py-3 text-lg font-semibold rounded-t-xl transition-all ${
-              activeTab === 'software'
-                ? 'bg-pink-500 text-white'
-                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-            }`}
-          >
-            Pending Software
-          </button>
-          <button
-            onClick={() => setActiveTab('create-admin')}
-            className={`px-6 py-3 text-lg font-semibold rounded-t-xl transition-all ${
-              activeTab === 'create-admin'
-                ? 'bg-pink-500 text-white'
-                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-            }`}
-          >
-            Create Admin
-          </button>
-        </div>
-        <div className="p-6 bg-gray-50 rounded-b-xl">
-          {error && <p className="text-red-500 mb-4 text-center">{error}</p>}
-          {success && <p className="text-green-500 mb-4 text-center">{success}</p>}
-          {activeTab === 'users' && (
-            <div>
-              <h3 className="text-2xl font-semibold text-gray-800 mb-6">Pending Users</h3>
-              {loading ? (
-                <div className="flex justify-center">
-                  <svg className="animate-spin h-8 w-8 text-pink-500" viewBox="0 0 24 24">
+
+        {!isConnected ? (
+          <div className="text-center">
+            <p className="text-xl text-gray-700 mb-8">{error || 'Failed to connect to MetaMask. Please try again.'}</p>
+            <button
+              onClick={async () => {
+                setIsConnecting(true);
+                const data = await initializeContract();
+                if (data) {
+                  setContractData(data);
+                  setIsConnected(true);
+                  setSuccess('Connected to MetaMask');
+                } else {
+                  setError('Failed to connect to MetaMask. Please try again.');
+                }
+                setIsConnecting(false);
+              }}
+              className="bg-gradient-to-r from-pink-500 to-rose-500 text-white text-xl py-4 px-8 rounded-xl hover:from-pink-600 hover:to-rose-600 focus:outline-none focus:ring-4 focus:ring-pink-400 transition-all duration-300"
+            >
+              Retry Connection
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="flex mb-6">
+              <button
+                onClick={() => setActiveTab('users')}
+                className={`px-6 py-3 text-lg font-semibold rounded-t-xl transition-all ${
+                  activeTab === 'users'
+                    ? 'bg-pink-500 text-white'
+                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                Pending Users
+              </button>
+              <button
+                onClick={() => setActiveTab('software')}
+                className={`px-6 py-3 text-lg font-semibold rounded-t-xl transition-all ${
+                  activeTab === 'software'
+                    ? 'bg-pink-500 text-white'
+                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                Pending Software
+              </button>
+              <button
+                onClick={() => setActiveTab('create-admin')}
+                className={`px-6 py-3 text-lg font-semibold rounded-t-xl transition-all ${
+                  activeTab === 'create-admin'
+                    ? 'bg-pink-500 text-white'
+                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                Create Admin
+              </button>
+            </div>
+
+            <div className="p-6 bg-gray-50 rounded-b-xl">
+              {error && <p className="text-red-500 mb-4 text-center text-xl">{error}</p>}
+              {success && <p className="text-green-500 mb-4 text-center text-xl">{success}</p>}
+              {loading && (
+                <div className="flex justify-center mb-8">
+                  <svg className="animate-spin h-8 w-8 text-pink-600" viewBox="0 0 24 24">
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
                   </svg>
                 </div>
-              ) : pendingUsers.length === 0 ? (
-                <p className="text-gray-600">No pending users.</p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left">
-                    <thead>
-                      <tr className="bg-pink-100">
-                        <th className="p-4 text-gray-700">Email</th>
-                        <th className="p-4 text-gray-700">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pendingUsers.map((user) => (
-                        <tr key={user.email} className="border-b hover:bg-gray-100">
-                          <td className="p-4 text-gray-800">{user.email}</td>
-                          <td className="p-4">
-                            <button
-                              onClick={() => handleApproveUser(user.email)}
-                              className="bg-green-500 text-white px-4 py-2 rounded-xl mr-2 hover:bg-green-600 disabled:opacity-50"
-                              disabled={loading}
-                            >
-                              Approve
-                            </button>
-                            <button
-                              onClick={() => handleRejectUser(user.email)}
-                              className="bg-red-500 text-white px-4 py-2 rounded-xl hover:bg-red-600 disabled:opacity-50"
-                              disabled={loading}
-                            >
-                              Reject
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
               )}
-            </div>
-          )}
-          {activeTab === 'software' && (
-            <div>
-              <h3 className="text-2xl font-semibold text-gray-800 mb-6">Pending Software</h3>
-              {loading ? (
-                <div className="flex justify-center">
-                  <svg className="animate-spin h-8 w-8 text-pink-500" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                  </svg>
-                </div>
-              ) : pendingSoftware.length === 0 ? (
-                <p className="text-gray-600">No pending software.</p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left">
-                    <thead>
-                      <tr className="bg-pink-100">
-                        <th className="p-4 text-gray-700">Name</th>
-                        <th className="p-4 text-gray-700">Version</th>
-                        <th className="p-4 text-gray-700">Developer Email</th>
-                        <th className="p-4 text-gray-700">Hash</th>
-                        <th className="p-4 text-gray-700">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pendingSoftware.map((item) => (
-                        <tr key={item.hash} className="border-b hover:bg-gray-100">
-                          <td className="p-4 text-gray-800">{item.name}</td>
-                          <td className="p-4 text-gray-800">{item.version}</td>
-                          <td className="p-4 text-gray-800">{item.developer_email}</td>
-                          <td className="p-4 text-gray-800 truncate max-w-xs">{item.hash}</td>
-                          <td className="p-4">
-                            <button
-                              onClick={() => handleApproveSoftware(item.hash)}
-                              className="bg-green-500 text-white px-4 py-2 rounded-xl mr-2 hover:bg-green-600 disabled:opacity-50"
-                              disabled={loading}
-                            >
-                              Approve
-                            </button>
-                            <button
-                              onClick={() => handleRejectSoftware(item.hash)}
-                              className="bg-red-500 text-white px-4 py-2 rounded-xl hover:bg-red-600 disabled:opacity-50"
-                              disabled={loading}
-                            >
-                              Reject
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          )}
-          {activeTab === 'create-admin' && (
-            <div>
-              <h3 className="text-2xl font-semibold text-gray-800 mb-6">Create New Admin</h3>
-              <form onSubmit={handleCreateAdmin} className="max-w-md mx-auto">
-                <div className="mb-6">
-                  <label className="block text-gray-700 mb-2 text-lg font-semibold">Email</label>
-                  <input
-                    type="email"
-                    value={newAdminEmail}
-                    onChange={(e) => setNewAdminEmail(e.target.value)}
-                    className="w-full text-lg text-gray-700 border border-pink-200 rounded-xl p-3 focus:outline-none focus:ring-4 focus:ring-pink-300 transition-all disabled:opacity-50"
-                    required
-                    disabled={loading}
-                  />
-                </div>
-                <div className="mb-8">
-                  <label className="block text-gray-700 mb-2 text-lg font-semibold">Password</label>
-                  <input
-                    type="password"
-                    value={newAdminPassword}
-                    onChange={(e) => setNewAdminPassword(e.target.value)}
-                    className="w-full text-lg text-gray-700 border border-pink-200 rounded-xl p-3 focus:outline-none focus:ring-4 focus:ring-pink-300 transition-all disabled:opacity-50"
-                    required
-                    disabled={loading}
-                  />
-                  <p className="text-sm text-gray-600 mt-2">
-                    Password must be 8+ characters with 1 uppercase, 1 number, 1 special character.
-                  </p>
-                </div>
-                <button
-                  type="submit"
-                  className="w-full bg-gradient-to-r from-pink-500 to-rose-500 text-white text-xl py-4 px-8 rounded-xl hover:from-pink-600 hover:to-rose-600 focus:outline-none focus:ring-4 focus:ring-pink-400 transition-all duration-300 disabled:opacity-50 shadow-lg"
-                  disabled={loading}
-                >
-                  {loading ? (
-                    <span className="flex items-center justify-center">
-                      <svg className="animate-spin h-6 w-6 mr-3 text-white" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                      </svg>
-                      Processing...
-                    </span>
+
+              {activeTab === 'users' && (
+                <div>
+                  <h3 className="text-2xl font-semibold text-gray-800 mb-6">Pending Users</h3>
+                  {pendingUsers.length === 0 && !loading ? (
+                    <p className="text-gray-600">No pending users.</p>
                   ) : (
-                    'Create Admin'
+                    <div className="overflow-x-auto">
+                      <table className="w-full bg-white rounded-lg shadow">
+                        <thead>
+                          <tr className="bg-pink-100 text-gray-700">
+                            <th className="py-3 px-4 text-left">Email</th>
+                            <th className="py-3 px-4 text-left">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {pendingUsers.map((user) => (
+                            <tr key={user.email} className="border-b hover:bg-gray-100">
+                              <td className="py-3 px-4 text-gray-800">{user.email}</td>
+                              <td className="py-3 px-4">
+                                <button
+                                  onClick={() => handleApproveUser(user.email)}
+                                  className="bg-green-500 text-white px-4 py-2 rounded-xl mr-2 hover:bg-green-600 disabled:opacity-50"
+                                  disabled={loading}
+                                >
+                                  Approve
+                                </button>
+                                <button
+                                  onClick={() => handleRejectUser(user.email)}
+                                  className="bg-red-500 text-white px-4 py-2 rounded-xl hover:bg-red-600 disabled:opacity-50"
+                                  disabled={loading}
+                                >
+                                  Reject
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   )}
-                </button>
-              </form>
+                </div>
+              )}
+
+              {activeTab === 'software' && (
+                <div>
+                  <h3 className="text-2xl font-semibold text-gray-800 mb-6">Pending Software</h3>
+                  {pendingSoftware.length === 0 && !loading ? (
+                    <p className="text-gray-600">No pending software.</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full bg-white rounded-lg shadow">
+                        <thead>
+                          <tr className="bg-pink-100 text-gray-700">
+                            <th className="py-3 px-4 text-left">Name</th>
+                            <th className="py-3 px-4 text-left">Version</th>
+                            <th className="py-3 px-4 text-left">Developer Email</th>
+                            <th className="py-3 px-4 text-left">Hash</th>
+                            <th className="py-3 px-4 text-left">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {pendingSoftware.map((item) => (
+                            <tr key={item.hash} className="border-b hover:bg-gray-100">
+                              <td className="py-3 px-4 text-gray-800">{item.name}</td>
+                              <td className="py-3 px-4 text-gray-800">{item.version}</td>
+                              <td className="py-3 px-4 text-gray-800">{item.developer_email}</td>
+                              <td className="py-3 px-4 text-gray-800 truncate max-w-xs" title={item.hash}>
+                                {item.hash.slice(0, 10)}...
+                              </td>
+                              <td className="py-3 px-4">
+                                <button
+                                  onClick={() => handleApproveSoftware(item.hash)}
+                                  className="bg-green-500 text-white px-4 py-2 rounded-xl mr-2 hover:bg-green-600 disabled:opacity-50"
+                                  disabled={loading}
+                                >
+                                  Approve
+                                </button>
+                                <button
+                                  onClick={() => handleRejectSoftware(item.hash)}
+                                  className="bg-red-500 text-white px-4 py-2 rounded-xl hover:bg-red-600 disabled:opacity-50"
+                                  disabled={loading}
+                                >
+                                  Reject
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeTab === 'create-admin' && (
+                <div>
+                  <h3 className="text-2xl font-semibold text-gray-800 mb-6">Create New Admin</h3>
+                  <form onSubmit={handleCreateAdmin} className="max-w-md mx-auto">
+                    <div className="mb-6">
+                      <label className="block text-gray-700 mb-2 text-lg font-semibold">Email</label>
+                      <input
+                        type="email"
+                        value={newAdminEmail}
+                        onChange={(e) => setNewAdminEmail(e.target.value)}
+                        className="w-full text-lg text-gray-700 border border-pink-200 rounded-xl p-3 focus:outline-none focus:ring-4 focus:ring-pink-300 transition-all disabled:opacity-50"
+                        required
+                        disabled={loading}
+                      />
+                    </div>
+                    <div className="mb-8">
+                      <label className="block text-gray-700 mb-2 text-lg font-semibold">Password</label>
+                      <input
+                        type="password"
+                        value={newAdminPassword}
+                        onChange={(e) => setNewAdminPassword(e.target.value)}
+                        className="w-full text-lg text-gray-700 border border-pink-200 rounded-xl p-3 focus:outline-none focus:ring-4 focus:ring-pink-300 transition-all disabled:opacity-50"
+                        required
+                        disabled={loading}
+                      />
+                      <p className="text-sm text-gray-600 mt-2">
+                        Password must be 8+ characters with 1 uppercase, 1 number, 1 special character.
+                      </p>
+                    </div>
+                    <button
+                      type="submit"
+                      className="w-full bg-gradient-to-r from-pink-500 to-rose-500 text-white text-xl py-4 px-8 rounded-xl hover:from-pink-600 hover:to-rose-600 focus:outline-none focus:ring-4 focus:ring-pink-400 transition-all duration-300 disabled:opacity-50 shadow-lg"
+                      disabled={loading}
+                    >
+                      {loading ? (
+                        <span className="flex items-center justify-center">
+                          <svg className="animate-spin h-6 w-6 mr-3 text-white" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                          </svg>
+                          Processing...
+                        </span>
+                      ) : (
+                        'Create Admin'
+                      )}
+                    </button>
+                  </form>
+                </div>
+              )}
             </div>
-          )}
-        </div>
+          </>
+        )}
       </div>
     </div>
   );

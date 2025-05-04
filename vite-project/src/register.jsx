@@ -18,7 +18,7 @@ const Register = () => {
     setLoading(true);
 
     try {
-      const response = await axios.post(`${API_URL}/register`, { email, password });
+      const response = await axios.post(`${API_URL}/users/register`, { email, password });
       setSuccess(response.data.message);
       setTimeout(() => navigate('/login'), 2000);
     } catch (err) {
