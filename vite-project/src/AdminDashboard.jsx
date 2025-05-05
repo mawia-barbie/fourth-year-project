@@ -19,7 +19,7 @@ const AdminDashboard = () => {
   const connectionLock = useRef(false);
   const navigate = useNavigate();
   const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-  const contractAddress = ' 0x235D5aA50CC82f2eA8BaAd7CcABc5d0979ad863C '; // Update with actual deployed address
+  const contractAddress = '0xc3ec5bd913e1D958e026C1D198E7905b9DecAfB9'; // Update with actual deployed address
   const contractABI = LicenseManagerArtifact.abi;
   const maxRetries = 3;
   const retryDelay = 5000;

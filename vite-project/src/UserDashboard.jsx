@@ -23,13 +23,12 @@ const UserDashboard = () => {
   const [isConnecting, setIsConnecting] = useState(true);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const [role, setRole] = useState('');
   const connectionLock = useRef(false);
   const navigate = useNavigate();
   const maxRetries = 3;
   const retryDelay = 5000;
 
-  const contractAddress = '0x235D5aA50CC82f2eA8BaAd7CcABc5d0979ad863C';
+  const contractAddress = '0xc3ec5bd913e1D958e026C1D198E7905b9DecAfB9';
   const contractABI = LicenseManagerArtifact.abi;
   const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -149,7 +148,6 @@ const UserDashboard = () => {
             const userResponse = await axios.get(`${API_URL}/users/me`, {
               headers: { Authorization: `Bearer ${token}` },
             });
-            setRole(userResponse.data.role);
             if (userResponse.data.role === 'admin') {
               navigate('/admin');
             }
@@ -171,7 +169,6 @@ const UserDashboard = () => {
             const userResponse = await axios.get(`${API_URL}/users/me`, {
               headers: { Authorization: `Bearer ${token}` },
             });
-            setRole(userResponse.data.role);
             if (userResponse.data.role === 'admin') {
               navigate('/admin');
             }
@@ -599,19 +596,23 @@ const UserDashboard = () => {
       console.log('Raw license details:', licenseDetails);
       const exists = licenseDetails.exists;
       const isCracked = licenseDetails.isCracked;
+
       if (!exists) {
-        setError(`Error: License ${selectedLicenseKey} does not exist`);
-        return;
-      }
-      if (isCracked) {
-        setError(`Error: License ${selectedLicenseKey} is already reported as cracked`);
+        setError(`No license found for key ${selectedLicenseKey}`);
+        console.error(`No license found for key ${selectedLicenseKey}`);
         return;
       }
 
-      const tx = await contract.reportCracked(selectedLicenseKey, { gasLimit: 500000 });
+      if (isCracked) {
+        setError(`License ${selectedLicenseKey} is already marked as cracked`);
+        console.warn(`License ${selectedLicenseKey} already cracked`);
+        return;
+      }
+
+      const tx = await contract.reportCracked(selectedLicenseKey, { gasLimit: 300000 });
       await tx.wait();
-      setSuccess(`License ${selectedLicenseKey} reported as cracked`);
-      console.log('License cracked reported:', selectedLicenseKey);
+      console.log('Cracked license reported for:', selectedLicenseKey);
+      setSuccess(`License ${selectedLicenseKey} reported as cracked successfully`);
     } catch (err) {
       let errorMessage = err.message;
       if (err.code === 'UNSUPPORTED_OPERATION' && err.operation === 'getEnsAddress') {
@@ -620,139 +621,13 @@ const UserDashboard = () => {
         errorMessage = err.data.message;
       } else if (err.reason) {
         errorMessage = err.reason;
-      } else if (err.code === 'CALL_EXCEPTION') {
-        errorMessage = 'Transaction reverted: Check contract logic or license status';
       }
-      setError(`Error reporting cracked: ${errorMessage}`);
+      setError(`Error reporting cracked license: ${errorMessage}`);
       console.error('reportCracked error:', err);
     } finally {
       setLoading(false);
     }
   }
-
-  // Approve software (for admins)
-  async function handleApproveSoftware(hash) {
-    if (!contractData) {
-      setError('Not connected to MetaMask. Please try again.');
-      return;
-    }
-    if (!window.confirm(`Are you sure you want to approve software with hash ${hash}?`)) return;
-
-    setLoading(true);
-    setError('');
-    setSuccess('');
-
-    try {
-      const token = localStorage.getItem('token');
-      const { contract } = contractData;
-      await axios.post(
-        `${API_URL}/admin/approve-software/${hash}`,
-        {},
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      const tx = await contract.approveSoftware(hash, { gasLimit: 300000 });
-      await tx.wait();
-      setSuccess(`Software ${hash} approved successfully`);
-
-      const [pendingRes, approvedRes, rejectedRes, allApprovedRes] = await Promise.all([
-        axios.get(`${API_URL}/software/pending`, { headers: { Authorization: `Bearer ${token}` } }),
-        axios.get(`${API_URL}/software/approved`, { headers: { Authorization: `Bearer ${token}` } }),
-        axios.get(`${API_URL}/software/rejected`, { headers: { Authorization: `Bearer ${token}` } }),
-        axios.get(`${API_URL}/software/all-approved`, { headers: { Authorization: `Bearer ${token}` } }),
-      ]);
-      setPendingSoftware(pendingRes.data.pending_software || []);
-      setApprovedSoftware(approvedRes.data.approved_software || []);
-      setRejectedSoftware(rejectedRes.data.rejected_software || []);
-      setAllApprovedSoftware(allApprovedRes.data.all_approved_software || []);
-    } catch (err) {
-      let errorMessage = 'Error approving software';
-      if (err.code === 'UNSUPPORTED_OPERATION' && err.operation === 'getEnsAddress') {
-        errorMessage = 'ENS is not supported on this network. Please ensure all addresses are valid.';
-      } else if (err.response?.data?.detail) {
-        if (Array.isArray(err.response.data.detail)) {
-          errorMessage = err.response.data.detail.map((e) => e.msg).join('; ');
-        } else {
-          errorMessage = err.response.data.detail;
-        }
-      } else if (err.message) {
-        errorMessage = err.message;
-      }
-      setError(errorMessage);
-      console.error('approveSoftware error:', err);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  // Reject software (for admins)
-  async function handleRejectSoftware(hash) {
-    if (!contractData) {
-      setError('Not connected to MetaMask. Please try again.');
-      return;
-    }
-    if (!window.confirm(`Are you sure you want to reject software with hash ${hash}?`)) return;
-
-    setLoading(true);
-    setError('');
-    setSuccess('');
-
-    try {
-      const token = localStorage.getItem('token');
-      const { contract } = contractData;
-      await axios.post(
-        `${API_URL}/admin/reject-software/${hash}`,
-        {},
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      const tx = await contract.rejectSoftware(hash, { gasLimit: 300000 });
-      await tx.wait();
-      setSuccess(`Software ${hash} rejected successfully`);
-
-      const [pendingRes, approvedRes, rejectedRes, allApprovedRes] = await Promise.all([
-        axios.get(`${API_URL}/software/pending`, { headers: { Authorization: `Bearer ${token}` } }),
-        axios.get(`${API_URL}/software/approved`, { headers: { Authorization: `Bearer ${token}` } }),
-        axios.get(`${API_URL}/software/rejected`, { headers: { Authorization: `Bearer ${token}` } }),
-        axios.get(`${API_URL}/software/all-approved`, { headers: { Authorization: `Bearer ${token}` } }),
-      ]);
-      setPendingSoftware(pendingRes.data.pending_software || []);
-      setApprovedSoftware(approvedRes.data.approved_software || []);
-      setRejectedSoftware(rejectedRes.data.rejected_software || []);
-      setAllApprovedSoftware(allApprovedRes.data.all_approved_software || []);
-    } catch (err) {
-      let errorMessage = 'Error rejecting software';
-      if (err.code === 'UNSUPPORTED_OPERATION' && err.operation === 'getEnsAddress') {
-        errorMessage = 'ENS is not supported on this network. Please ensure all addresses are valid.';
-      } else if (err.response?.data?.detail) {
-        if (Array.isArray(err.response.data.detail)) {
-          errorMessage = err.response.data.detail.map((e) => e.msg).join('; ');
-        } else {
-          errorMessage = err.response.data.detail;
-        }
-      } else if (err.message) {
-        errorMessage = err.message;
-      }
-      setError(errorMessage);
-      console.error('rejectSoftware error:', err);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  // Get display name for licenses
-  const getDisplayName = (softwareName, index, licenseKey) => {
-    console.log('getDisplayName called:', { softwareName, index, licenseKey });
-    if (!softwareName || softwareName === 'Untitled License' || softwareName === 'Error Fetching Name') {
-      console.warn('Invalid softwareName, using fallback:', softwareName);
-      return `License (${licenseKey.slice(0, 6)}...)`;
-    }
-    const sameNameCount = userLicenses.filter(
-      (license, i) => license.softwareName === softwareName && i <= index
-    ).length;
-    if (sameNameCount === 1) {
-      return softwareName;
-    }
-    return `${softwareName} #${sameNameCount} (${licenseKey.slice(0, 6)}...)`;
-  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-pink-50 to-pink-100 flex items-center justify-center p-6 relative">
@@ -770,12 +645,12 @@ const UserDashboard = () => {
         </div>
       )}
       <div
-        className={`bg-white rounded-3xl shadow-2xl p-12 w-full max-w-5xl transform transition-all hover:scale-105 ${
+        className={`bg-white rounded-3xl shadow-2xl p-12 w-full max-w-6xl transform transition-all hover:scale-105 ${
           isConnecting ? 'opacity-0' : 'opacity-100'
         }`}
       >
         <div className="flex justify-between items-center mb-8">
-          <h1 className="text-5xl font-extrabold text-center text-pink-800">Cracked Software Detector</h1>
+          <h2 className="text-5xl font-extrabold text-center text-pink-800">User Dashboard</h2>
           <button
             onClick={() => {
               localStorage.removeItem('token');
@@ -810,14 +685,9 @@ const UserDashboard = () => {
           </div>
         ) : (
           <>
-            {error ? (
-              typeof error === 'string' ? (
-                <p className="text-red-500 mb-4 text-center text-xl">{error}</p>
-              ) : (
-                <p className="text-red-500 mb-4 text-center text-xl">An unexpected error occurred</p>
-              )
-            ) : null}
+            {error && <p className="text-red-500 mb-4 text-center text-xl">{error}</p>}
             {success && <p className="text-green-500 mb-4 text-center text-xl">{success}</p>}
+            {status && <p className="text-yellow-500 mb-4 text-center text-xl">{status}</p>}
             {loading && (
               <div className="flex justify-center mb-8">
                 <svg className="animate-spin h-8 w-8 text-pink-600" viewBox="0 0 24 24">
@@ -827,164 +697,155 @@ const UserDashboard = () => {
               </div>
             )}
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
-              <input
-                type="text"
-                value={softwareName}
-                onChange={(e) => setSoftwareName(e.target.value)}
-                placeholder="Enter software name"
-                className="text-xl text-gray-700 border border-pink-200 rounded-xl p-4 focus:outline-none focus:ring-4 focus:ring-pink-300 transition-all disabled:opacity-50"
-                disabled={loading}
-              />
-              <input
-                type="text"
-                value={softwareVersion}
-                onChange={(e) => setSoftwareVersion(e.target.value)}
-                placeholder="Enter software version"
-                className="text-xl text-gray-700 border border-pink-200 rounded-xl p-4 focus:outline-none focus:ring-4 focus:ring-pink-300 transition-all disabled:opacity-50"
-                disabled={loading}
-              />
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+              <div>
+                <h3 className="text-2xl font-semibold text-gray-800 mb-6">Upload Software</h3>
+                <div className="mb-6">
+                  <label className="block text-gray-700 mb-2 text-lg font-semibold">Software Name</label>
+                  <input
+                    type="text"
+                    value={softwareName}
+                    onChange={(e) => setSoftwareName(e.target.value)}
+                    className="w-full text-lg text-gray-700 border border-pink-200 rounded-xl p-3 focus:outline-none focus:ring-4 focus:ring-pink-300 transition-all"
+                    placeholder="Enter software name"
+                    disabled={loading}
+                  />
+                </div>
+                <div className="mb-6">
+                  <label className="block text-gray-700 mb-2 text-lg font-semibold">Software Version</label>
+                  <input
+                    type="text"
+                    value={softwareVersion}
+                    onChange={(e) => setSoftwareVersion(e.target.value)}
+                    className="w-full text-lg text-gray-700 border border-pink-200 rounded-xl p-3 focus:outline-none focus:ring-4 focus:ring-pink-300 transition-all"
+                    placeholder="Enter software version"
+                    disabled={loading}
+                  />
+                </div>
+                <div className="mb-8">
+                  <label className="block text-gray-700 mb-2 text-lg font-semibold">Software File</label>
+                  <input
+                    type="file"
+                    onChange={(e) => setFile(e.target.files[0])}
+                    className="w-full text-lg text-gray-700 border border-pink-200 rounded-xl p-3 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-pink-50 file:text-pink-700 hover:file:bg-pink-100 transition-all"
+                    disabled={loading}
+                  />
+                </div>
+                <button
+                  onClick={handleSoftwareUpload}
+                  className="w-full bg-gradient-to-r from-pink-500 to-rose-500 text-white text-xl py-4 px-8 rounded-xl hover:from-pink-600 hover:to-rose-600 focus:outline-none focus:ring-4 focus:ring-pink-400 transition-all duration-300 disabled:opacity-50 shadow-lg"
+                  disabled={loading}
+                >
+                  {loading ? (
+                    <span className="flex items-center justify-center">
+                      <svg className="animate-spin h-6 w-6 mr-3 text-white" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                      </svg>
+                      Processing...
+                    </span>
+                  ) : (
+                    'Upload Software'
+                  )}
+                </button>
+              </div>
+
+              <div>
+                <h3 className="text-2xl font-semibold text-gray-800 mb-6">Manage Licenses</h3>
+                <div className="mb-6">
+                  <label className="block text-gray-700 mb-2 text-lg font-semibold">Select License</label>
+                  <select
+                    value={selectedLicenseKey}
+                    onChange={(e) => setSelectedLicenseKey(e.target.value)}
+                    className="w-full text-lg text-gray-700 border border-pink-200 rounded-xl p-3 focus:outline-none focus:ring-4 focus:ring-pink-300 transition-all"
+                    disabled={loading}
+                  >
+                    <option value="">Select a license</option>
+                    {userLicenses.map((license) => (
+                      <option key={license.licenseKey} value={license.licenseKey}>
+                        {license.softwareName} ({license.licenseKey.slice(0, 10)}...)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="mb-8">
+                  <button
+                    onClick={handleGenerateLicense}
+                    className="w-full bg-gradient-to-r from-green-500 to-teal-500 text-white text-xl py-4 px-8 rounded-xl hover:from-green-600 hover:to-teal-600 focus:outline-none focus:ring-4 focus:ring-green-400 transition-all duration-300 disabled:opacity-50 shadow-lg mb-4"
+                    disabled={loading}
+                  >
+                    {loading ? (
+                      <span className="flex items-center justify-center">
+                        <svg className="animate-spin h-6 w-6 mr-3 text-white" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                        </svg>
+                        Processing...
+                      </span>
+                    ) : (
+                      'Generate License'
+                    )}
+                  </button>
+                  <button
+                    onClick={handleCheckAuthenticity}
+                    className="w-full bg-gradient-to-r from-blue-500 to-indigo-500 text-white text-xl py-4 px-8 rounded-xl hover:from-blue-600 hover:to-indigo-600 focus:outline-none focus:ring-4 focus:ring-blue-400 transition-all duration-300 disabled:opacity-50 shadow-lg mb-4"
+                    disabled={loading}
+                  >
+                    {loading ? (
+                      <span className="flex items-center justify-center">
+                        <svg className="animate-spin h-6 w-6 mr-3 text-white" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                        </svg>
+                        Processing...
+                      </span>
+                    ) : (
+                      'Check Authenticity'
+                    )}
+                  </button>
+                  <button
+                    onClick={handleReportCracked}
+                    className="w-full bg-gradient-to-r from-red-500 to-rose-500 text-white text-xl py-4 px-8 rounded-xl hover:from-red-600 hover:to-rose-600 focus:outline-none focus:ring-4 focus:ring-red-400 transition-all duration-300 disabled:opacity-50 shadow-lg"
+                    disabled={loading}
+                  >
+                    {loading ? (
+                      <span className="flex items-center justify-center">
+                        <svg className="animate-spin h-6 w-6 mr-3 text-white" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                        </svg>
+                        Processing...
+                      </span>
+                    ) : (
+                      'Report Cracked License'
+                    )}
+                  </button>
+                </div>
+              </div>
             </div>
 
-            <input
-              type="file"
-              onChange={(e) => setFile(e.target.files[0])}
-              className="block w-full text-lg text-gray-700 file:mr-6 file:py-4 file:px-8 file:rounded-full file:border-0 file:text-xl file:font-semibold file:bg-pink-100 file:text-pink-700 hover:file:bg-pink-200 mb-8 disabled:opacity-50"
-              disabled={loading}
-            />
-
-            <div className="flex flex-col sm:flex-row sm:space-x-6 mb-10">
-              <button
-                onClick={handleSoftwareUpload}
-                className="flex-1 bg-gradient-to-r from-blue-500 to-indigo-500 text-white text-xl py-4 px-8 rounded-xl hover:from-blue-600 hover:to-indigo-600 focus:outline-none focus:ring-4 focus:ring-blue-400 transition-all duration-300 disabled:opacity-50 shadow-lg mb-4 sm:mb-0"
-                disabled={loading}
-              >
-                {loading ? (
-                  <span className="flex items-center justify-center">
-                    <svg className="animate-spin h-6 w-6 mr-3 text-white" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                    </svg>
-                    Processing...
-                  </span>
-                ) : (
-                  'Upload Software'
-                )}
-              </button>
-              <button
-                onClick={handleGenerateLicense}
-                className="flex-1 bg-gradient-to-r from-pink-500 to-rose-500 text-white text-xl py-4 px-8 rounded-xl hover:from-pink-600 hover:to-rose-600 focus:outline-none focus:ring-4 focus:ring-pink-400 transition-all duration-300 disabled:opacity-50 shadow-lg mb-4 sm:mb-0"
-                disabled={loading}
-              >
-                {loading ? (
-                  <span className="flex items-center justify-center">
-                    <svg className="animate-spin h-6 w-6 mr-3 text-white" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                    </svg>
-                    Processing...
-                  </span>
-                ) : (
-                  'Generate License'
-                )}
-              </button>
-              <button
-                onClick={handleCheckAuthenticity}
-                className="flex-1 bg-gradient-to-r from-fuchsia-500 to-pink-600 text-white text-xl py-4 px-8 rounded-xl hover:from-fuchsia-600 hover:to-pink-700 focus:outline-none focus:ring-4 focus:ring-fuchsia-400 transition-all duration-300 disabled:opacity-50 shadow-lg"
-                disabled={loading}
-              >
-                {loading ? (
-                  <span className="flex items-center justify-center">
-                    <svg className="animate-spin h-6 w-6 mr-3 text-white" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                    </svg>
-                    Processing...
-                  </span>
-                ) : (
-                  'Check Authenticity'
-                )}
-              </button>
-            </div>
-
-            <select
-              value={selectedLicenseKey}
-              onChange={(e) => setSelectedLicenseKey(e.target.value)}
-              className="block w-full text-xl text-gray-700 border border-pink-200 rounded-xl p-4 mb-8 h-16 bg-white focus:outline-none focus:ring-4 focus:ring-pink-300 transition-all disabled:opacity-50"
-              disabled={loading}
-            >
-              <option value="">Select a Software License</option>
-              {userLicenses.map(({ licenseKey, softwareName }, index) => {
-                const displayName = getDisplayName(softwareName, index, licenseKey);
-                console.log('Rendering option:', { licenseKey, softwareName, displayName });
-                return (
-                  <option key={licenseKey} value={licenseKey} title={licenseKey}>
-                    {displayName.length > 50 ? `${displayName.slice(0, 47)}...` : displayName}
-                  </option>
-                );
-              })}
-            </select>
-
-            <button
-              onClick={handleReportCracked}
-              className="w-full bg-gradient-to-r from-red-500 to-pink-500 text-white text-xl py-4 px-8 rounded-xl hover:from-red-600 hover:to-pink-600 focus:outline-none focus:ring-4 focus:ring-red-400 transition-all duration-300 disabled:opacity-50 shadow-lg mb-10"
-              disabled={loading || !selectedLicenseKey}
-            >
-              {loading ? (
-                <span className="flex items-center justify-center">
-                  <svg className="animate-spin h-6 w-6 mr-3 text-white" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                  </svg>
-                  Processing...
-                </span>
-              ) : (
-                'Report Cracked'
-              )}
-            </button>
-
-            {/* Pending Software Table */}
-            <div className="mb-10">
-              <h2 className="text-2xl font-bold text-gray-800 mb-4">Pending Software</h2>
-              {pendingSoftware.length === 0 ? (
+            <div className="mb-8">
+              <h3 className="text-2xl font-semibold text-gray-800 mb-6">Pending Software</h3>
+              {pendingSoftware.length === 0 && !loading ? (
                 <p className="text-gray-600">No pending software.</p>
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="min-w-full bg-white rounded-lg shadow">
+                  <table className="w-full bg-white rounded-lg shadow">
                     <thead>
                       <tr className="bg-pink-100 text-gray-700">
                         <th className="py-3 px-4 text-left">Name</th>
                         <th className="py-3 px-4 text-left">Version</th>
                         <th className="py-3 px-4 text-left">Hash</th>
-                        {role === 'admin' && <th className="py-3 px-4 text-left">Actions</th>}
                       </tr>
                     </thead>
                     <tbody>
-                      {pendingSoftware.map((software) => (
-                        <tr key={software.hash} className="border-b hover:bg-gray-50">
-                          <td className="py-3 px-4">{software.name}</td>
-                          <td className="py-3 px-4">{software.version}</td>
-                          <td className="py-3 px-4 truncate max-w-xs" title={software.hash}>
-                            {software.hash.slice(0, 10)}...
+                      {pendingSoftware.map((item) => (
+                        <tr key={item.hash} className="border-b hover:bg-gray-100">
+                          <td className="py-3 px-4 text-gray-800">{item.name}</td>
+                          <td className="py-3 px-4 text-gray-800">{item.version}</td>
+                          <td className="py-3 px-4 text-gray-800 truncate max-w-xs" title={item.hash}>
+                            {item.hash.slice(0, 10)}...
                           </td>
-                          {role === 'admin' && (
-                            <td className="py-3 px-4">
-                              <button
-                                onClick={() => handleApproveSoftware(software.hash)}
-                                className="bg-green-500 text-white py-1 px-3 rounded hover:bg-green-600 mr-2"
-                                disabled={loading}
-                              >
-                                Approve
-                              </button>
-                              <button
-                                onClick={() => handleRejectSoftware(software.hash)}
-                                className="bg-red-500 text-white py-1 px-3 rounded hover:bg-red-600"
-                                disabled={loading}
-                              >
-                                Reject
-                              </button>
-                            </td>
-                          )}
                         </tr>
                       ))}
                     </tbody>
@@ -993,14 +854,13 @@ const UserDashboard = () => {
               )}
             </div>
 
-            {/* Approved Software Table */}
-            <div className="mb-10">
-              <h2 className="text-2xl font-bold text-gray-800 mb-4">Your Approved Software</h2>
-              {approvedSoftware.length === 0 ? (
+            <div className="mb-8">
+              <h3 className="text-2xl font-semibold text-gray-800 mb-6">Approved Software</h3>
+              {approvedSoftware.length === 0 && !loading ? (
                 <p className="text-gray-600">No approved software.</p>
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="min-w-full bg-white rounded-lg shadow">
+                  <table className="w-full bg-white rounded-lg shadow">
                     <thead>
                       <tr className="bg-pink-100 text-gray-700">
                         <th className="py-3 px-4 text-left">Name</th>
@@ -1009,12 +869,12 @@ const UserDashboard = () => {
                       </tr>
                     </thead>
                     <tbody>
-                      {approvedSoftware.map((software) => (
-                        <tr key={software.hash} className="border-b hover:bg-gray-50">
-                          <td className="py-3 px-4">{software.name}</td>
-                          <td className="py-3 px-4">{software.version}</td>
-                          <td className="py-3 px-4 truncate max-w-xs" title={software.hash}>
-                            {software.hash.slice(0, 10)}...
+                      {approvedSoftware.map((item) => (
+                        <tr key={item.hash} className="border-b hover:bg-gray-100">
+                          <td className="py-3 px-4 text-gray-800">{item.name}</td>
+                          <td className="py-3 px-4 text-gray-800">{item.version}</td>
+                          <td className="py-3 px-4 text-gray-800 truncate max-w-xs" title={item.hash}>
+                            {item.hash.slice(0, 10)}...
                           </td>
                         </tr>
                       ))}
@@ -1024,14 +884,13 @@ const UserDashboard = () => {
               )}
             </div>
 
-            {/* Rejected Software Table */}
-            <div className="mb-10">
-              <h2 className="text-2xl font-bold text-gray-800 mb-4">Rejected Software</h2>
-              {rejectedSoftware.length === 0 ? (
+            <div className="mb-8">
+              <h3 className="text-2xl font-semibold text-gray-800 mb-6">Rejected Software</h3>
+              {rejectedSoftware.length === 0 && !loading ? (
                 <p className="text-gray-600">No rejected software.</p>
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="min-w-full bg-white rounded-lg shadow">
+                  <table className="w-full bg-white rounded-lg shadow">
                     <thead>
                       <tr className="bg-pink-100 text-gray-700">
                         <th className="py-3 px-4 text-left">Name</th>
@@ -1040,12 +899,12 @@ const UserDashboard = () => {
                       </tr>
                     </thead>
                     <tbody>
-                      {rejectedSoftware.map((software) => (
-                        <tr key={software.hash} className="border-b hover:bg-gray-50">
-                          <td className="py-3 px-4">{software.name}</td>
-                          <td className="py-3 px-4">{software.version}</td>
-                          <td className="py-3 px-4 truncate max-w-xs" title={software.hash}>
-                            {software.hash.slice(0, 10)}...
+                      {rejectedSoftware.map((item) => (
+                        <tr key={item.hash} className="border-b hover:bg-gray-100">
+                          <td className="py-3 px-4 text-gray-800">{item.name}</td>
+                          <td className="py-3 px-4 text-gray-800">{item.version}</td>
+                          <td className="py-3 px-4 text-gray-800 truncate max-w-xs" title={item.hash}>
+                            {item.hash.slice(0, 10)}...
                           </td>
                         </tr>
                       ))}
@@ -1055,47 +914,36 @@ const UserDashboard = () => {
               )}
             </div>
 
-            {/* All Approved Software Table */}
-            <div className="mb-10">
-              <h2 className="text-2xl font-bold text-gray-800 mb-4">All Approved Software</h2>
-              {allApprovedSoftware.length === 0 ? (
+            <div>
+              <h3 className="text-2xl font-semibold text-gray-800 mb-6">All Approved Software</h3>
+              {allApprovedSoftware.length === 0 && !loading ? (
                 <p className="text-gray-600">No approved software available.</p>
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="min-w-full bg-white rounded-lg shadow">
+                  <table className="w-full bg-white rounded-lg shadow">
                     <thead>
                       <tr className="bg-pink-100 text-gray-700">
                         <th className="py-3 px-4 text-left">Name</th>
                         <th className="py-3 px-4 text-left">Version</th>
+                        <th className="py-3 px-4 text-left">Developer Email</th>
                         <th className="py-3 px-4 text-left">Hash</th>
-                        <th className="py-3 px-4 text-left">Developer</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {allApprovedSoftware.map((software) => (
-                        <tr key={software.hash} className="border-b hover:bg-gray-50">
-                          <td className="py-3 px-4">{software.name}</td>
-                          <td className="py-3 px-4">{software.version}</td>
-                          <td className="py-3 px-4 truncate max-w-xs" title={software.hash}>
-                            {software.hash.slice(0, 10)}...
+                      {allApprovedSoftware.map((item) => (
+                        <tr key={item.hash} className="border-b hover:bg-gray-100">
+                          <td className="py-3 px-4 text-gray-800">{item.name}</td>
+                          <td className="py-3 px-4 text-gray-800">{item.version}</td>
+                          <td className="py-3 px-4 text-gray-800">{item.developer_email}</td>
+                          <td className="py-3 px-4 text-gray-800 truncate max-w-xs" title={item.hash}>
+                            {item.hash.slice(0, 10)}...
                           </td>
-                          <td className="py-3 px-4">{software.developer_email}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
               )}
-            </div>
-
-            <div className="mt-10 space-y-4">
-              <p className="text-xl text-gray-700 break-words">
-                <span className="font-semibold">Status:</span> {status}
-              </p>
-              <p className="text-xl text-gray-700 break-all" title={licenseKey}>
-                <span className="font-semibold">License Key:</span>{' '}
-                {licenseKey ? `${licenseKey.slice(0, 20)}...` : ''}
-              </p>
             </div>
           </>
         )}
