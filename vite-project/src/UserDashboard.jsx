@@ -15,6 +15,9 @@ const UserDashboard = () => {
   const [approvedSoftware, setApprovedSoftware] = useState([]);
   const [rejectedSoftware, setRejectedSoftware] = useState([]);
   const [allApprovedSoftware, setAllApprovedSoftware] = useState([]);
+  const [approvedSearchQuery, setApprovedSearchQuery] = useState('');
+  const [allApprovedSearchQuery, setAllApprovedSearchQuery] = useState('');
+  const [showFaq, setShowFaq] = useState(false);
   const [status, setStatus] = useState('');
   const [licenseKey, setLicenseKey] = useState('');
   const [loading, setLoading] = useState(false);
@@ -31,6 +34,42 @@ const UserDashboard = () => {
   const contractAddress = '0xc3ec5bd913e1D958e026C1D198E7905b9DecAfB9';
   const contractABI = LicenseManagerArtifact.abi;
   const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+  // Switch to Ganache network
+  async function switchToGanache() {
+    try {
+      await window.ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: '0x539' }], // 1337 in hex
+      });
+      console.log('Switched to Ganache network');
+    } catch (switchError) {
+      if (switchError.code === 4902) {
+        try {
+          await window.ethereum.request({
+            method: 'wallet_addEthereumChain',
+            params: [
+              {
+                chainId: '0x539',
+                chainName: 'Ganache',
+                rpcUrls: ['http://127.0.0.1:7545'],
+                nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
+              },
+            ],
+          });
+          console.log('Added and switched to Ganache network');
+        } catch (addError) {
+          console.error('Failed to add Ganache network:', addError);
+          setError('Failed to add Ganache network to MetaMask');
+          throw addError;
+        }
+      } else {
+        console.error('Failed to switch network:', switchError);
+        setError('Failed to switch to Ganache network');
+        throw switchError;
+      }
+    }
+  }
 
   // Connect to MetaMask
   async function connectWallet(retryCount = 0) {
@@ -57,13 +96,16 @@ const UserDashboard = () => {
       console.log('Connected accounts:', accounts);
       return accounts;
     } catch (err) {
+      console.error('connectWallet error:', { code: err.code, message: err.message });
       if (err.code === -32002 && retryCount < maxRetries) {
         console.warn(`Retrying eth_requestAccounts (attempt ${retryCount + 1})...`);
         await new Promise((resolve) => setTimeout(resolve, retryDelay));
         return connectWallet(retryCount + 1);
+      } else if (err.code === 4001) {
+        setError('MetaMask connection rejected by user');
+      } else {
+        setError(`Error connecting to MetaMask: ${err.message}`);
       }
-      setError(`Error connecting to MetaMask: ${err.message}`);
-      console.error('connectWallet error:', err);
       return null;
     } finally {
       connectionLock.current = false;
@@ -73,33 +115,41 @@ const UserDashboard = () => {
   // Initialize contract
   async function initializeContract() {
     console.log('Initializing contract...');
+    await switchToGanache();
     const accounts = await connectWallet();
     if (!accounts) {
+      console.error('No accounts returned from connectWallet');
       return null;
     }
+    console.log('Accounts retrieved:', accounts);
 
     try {
       if (!ethers.isAddress(contractAddress)) {
+        console.error(`Invalid contract address: ${contractAddress}`);
         throw new Error(`Invalid contract address: ${contractAddress}`);
       }
+      console.log('Contract address validated:', contractAddress);
 
       const provider = new ethers.BrowserProvider(window.ethereum, {
         chainId: 1337,
         name: 'ganache',
         ensAddress: null,
       });
+      console.log('Provider initialized');
 
       const signer = await provider.getSigner();
       const signerAddress = await signer.getAddress();
       if (!ethers.isAddress(signerAddress)) {
+        console.error(`Invalid signer address: ${signerAddress}`);
         throw new Error(`Invalid signer address: ${signerAddress}`);
       }
       console.log('Signer address:', signerAddress);
 
       const network = await provider.getNetwork();
+      console.log('Network retrieved:', network);
       if (Number(network.chainId) !== 1337) {
+        console.error('Incorrect network, expected chainId 1337, got:', network.chainId);
         setError('Please connect MetaMask to Ganache (chainId 1337)');
-        console.warn('Incorrect network, expected chainId 1337, got:', network.chainId);
         return null;
       }
 
@@ -107,15 +157,18 @@ const UserDashboard = () => {
       console.log('Contract initialized successfully');
       return { contract, signer, address: signerAddress };
     } catch (err) {
-      setError(`Error initializing contract: ${err.message}`);
       console.error('initializeContract error:', err);
+      setError(`Error initializing contract: ${err.message}`);
       return null;
     }
   }
 
   // Auto-connect to MetaMask and validate user access
   useEffect(() => {
+    let isMounted = true;
+
     async function autoConnect() {
+      if (!isMounted) return;
       const token = localStorage.getItem('token');
       if (!token) {
         navigate('/login');
@@ -136,7 +189,7 @@ const UserDashboard = () => {
         if (accounts.length > 0) {
           console.log('Existing MetaMask connection found:', accounts);
           const data = await initializeContract();
-          if (data) {
+          if (data && isMounted) {
             setContractData(data);
             setIsConnected(true);
             setSuccess('Connected to MetaMask');
@@ -151,13 +204,12 @@ const UserDashboard = () => {
             if (userResponse.data.role === 'admin') {
               navigate('/admin');
             }
-          } else {
-            setError('Failed to initialize contract. Please try again.');
+          } else if (isMounted) {
           }
         } else {
           console.log('No existing connection, attempting to connect...');
           const data = await initializeContract();
-          if (data) {
+          if (data && isMounted) {
             setContractData(data);
             setIsConnected(true);
             setSuccess('Connected to MetaMask');
@@ -172,28 +224,33 @@ const UserDashboard = () => {
             if (userResponse.data.role === 'admin') {
               navigate('/admin');
             }
-          } else {
+          } else if (isMounted) {
             setError('Failed to connect to MetaMask. Please try again.');
           }
         }
       } catch (err) {
         console.error('Auto-connect error:', err);
-        if (err.response?.status === 401) {
-          localStorage.removeItem('token');
-          navigate('/login');
-        } else if (err.response?.status === 403) {
-          navigate('/admin');
-        } else {
-          setError(`Error connecting to MetaMask: ${err.message}`);
+        if (isMounted) {
+          if (err.response?.status === 401) {
+            localStorage.removeItem('token');
+            navigate('/login');
+          } else if (err.response?.status === 403) {
+            navigate('/admin');
+          } else {
+            setError(`Error connecting to MetaMask: ${err.message}`);
+          }
         }
       } finally {
-        setIsConnecting(false);
+        if (isMounted) {
+          setIsConnecting(false);
+        }
       }
     }
 
     autoConnect();
 
     return () => {
+      isMounted = false;
       if (contractData?.contract) {
         console.log('Cleaning up contract event listeners');
         contractData.contract.removeAllListeners();
@@ -629,6 +686,19 @@ const UserDashboard = () => {
     }
   }
 
+  // Filter software based on search query
+  const filteredApprovedSoftware = approvedSoftware.filter((item) =>
+    [item.name, item.version, item.hash].some((field) =>
+      field?.toLowerCase().includes(approvedSearchQuery.toLowerCase())
+    )
+  );
+
+  const filteredAllApprovedSoftware = allApprovedSoftware.filter((item) =>
+    [item.name, item.version, item.developer_email, item.hash].some((field) =>
+      field?.toLowerCase().includes(allApprovedSearchQuery.toLowerCase())
+    )
+  );
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-pink-50 to-pink-100 flex items-center justify-center p-6 relative">
       {isConnecting && (
@@ -667,7 +737,7 @@ const UserDashboard = () => {
             <p className="text-xl text-gray-700 mb-8">{error || 'Failed to connect to MetaMask. Please try again.'}</p>
             <button
               onClick={async () => {
-                setIsConnecting(true);
+                setIsConnecting(true); // Fixed syntax error
                 const data = await initializeContract();
                 if (data) {
                   setContractData(data);
@@ -855,9 +925,21 @@ const UserDashboard = () => {
             </div>
 
             <div className="mb-8">
-              <h3 className="text-2xl font-semibold text-gray-800 mb-6">Approved Software</h3>
-              {approvedSoftware.length === 0 && !loading ? (
-                <p className="text-gray-600">No approved software.</p>
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-2xl font-semibold text-gray-800">Approved Software</h3>
+                <div className="w-1/3">
+                  <input
+                    type="text"
+                    value={approvedSearchQuery}
+                    onChange={(e) => setApprovedSearchQuery(e.target.value)}
+                    className="w-full text-lg text-gray-700 border border-pink-200 rounded-xl p-3 focus:outline-none focus:ring-4 focus:ring-pink-300 transition-all"
+                    placeholder="Search by name, version, or hash"
+                    disabled={loading}
+                  />
+                </div>
+              </div>
+              {filteredApprovedSoftware.length === 0 && !loading ? (
+                <p className="text-gray-600">No approved software matches your search.</p>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full bg-white rounded-lg shadow">
@@ -869,7 +951,7 @@ const UserDashboard = () => {
                       </tr>
                     </thead>
                     <tbody>
-                      {approvedSoftware.map((item) => (
+                      {filteredApprovedSoftware.map((item) => (
                         <tr key={item.hash} className="border-b hover:bg-gray-100">
                           <td className="py-3 px-4 text-gray-800">{item.name}</td>
                           <td className="py-3 px-4 text-gray-800">{item.version}</td>
@@ -914,10 +996,22 @@ const UserDashboard = () => {
               )}
             </div>
 
-            <div>
-              <h3 className="text-2xl font-semibold text-gray-800 mb-6">All Approved Software</h3>
-              {allApprovedSoftware.length === 0 && !loading ? (
-                <p className="text-gray-600">No approved software available.</p>
+            <div className="mb-8">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-2xl font-semibold text-gray-800">All Approved Software</h3>
+                <div className="w-1/3">
+                  <input
+                    type="text"
+                    value={allApprovedSearchQuery}
+                    onChange={(e) => setAllApprovedSearchQuery(e.target.value)}
+                    className="w-full text-lg text-gray-700 border border-pink-200 rounded-xl p-3 focus:outline-none focus:ring-4 focus:ring-pink-300 transition-all"
+                    placeholder="Search by name, version, email, or hash"
+                    disabled={loading}
+                  />
+                </div>
+              </div>
+              {filteredAllApprovedSoftware.length === 0 && !loading ? (
+                <p className="text-gray-600">No approved software matches your search.</p>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full bg-white rounded-lg shadow">
@@ -930,7 +1024,7 @@ const UserDashboard = () => {
                       </tr>
                     </thead>
                     <tbody>
-                      {allApprovedSoftware.map((item) => (
+                      {filteredAllApprovedSoftware.map((item) => (
                         <tr key={item.hash} className="border-b hover:bg-gray-100">
                           <td className="py-3 px-4 text-gray-800">{item.name}</td>
                           <td className="py-3 px-4 text-gray-800">{item.version}</td>
@@ -942,6 +1036,64 @@ const UserDashboard = () => {
                       ))}
                     </tbody>
                   </table>
+                </div>
+              )}
+            </div>
+
+            <div className="mt-12">
+              <button
+                onClick={() => setShowFaq(!showFaq)}
+                className="w-full bg-gradient-to-r from-pink-500 to-rose-500 text-white text-xl py-4 px-8 rounded-xl hover:from-pink-600 hover:to-rose-600 focus:outline-none focus:ring-4 focus:ring-pink-400 transition-all duration-300 shadow-lg"
+              >
+                {showFaq ? 'Hide Help & FAQ' : 'Show Help & FAQ'}
+              </button>
+              {showFaq && (
+                <div className="mt-6 bg-pink-50 p-6 rounded-xl">
+                  <h3 className="text-2xl font-semibold text-gray-800 mb-4">Help & FAQ</h3>
+                  <div className="space-y-4">
+                    <div>
+                      <h4 className="text-lg font-semibold text-gray-700">How do I upload software?</h4>
+                      <p className="text-gray-600">
+                        Enter the software name and version, select a file, and click "Upload Software." The file will be hashed and sent to the blockchain after admin approval.
+                      </p>
+                    </div>
+                    <div>
+                      <h4 className="text-lg font-semibold text-gray-700">Why is my software pending?</h4>
+                      <p className="text-gray-600">
+                        All uploaded software requires admin approval. Check the "Pending Software" table for status updates.
+                      </p>
+                    </div>
+                    <div>
+                      <h4 className="text-lg font-semibold text-gray-700">How do I generate a license?</h4>
+                      <p className="text-gray-600">
+                        Upload an approved software file, enter a name, and click "Generate License." The license will be issued on the blockchain.
+                      </p>
+                    </div>
+                    <div>
+                      <h4 className="text-lg font-semibold text-gray-700">How do I check authenticity?</h4>
+                      <p className="text-gray-600">
+                        Upload a file, select a license from the dropdown, and click "Check Authenticity." The system will verify if the file matches the license.
+                      </p>
+                    </div>
+                    <div>
+                      <h4 className="text-lg font-semibold text-gray-700">What does "Report Cracked License" do?</h4>
+                      <p className="text-gray-600">
+                        If you suspect a license has been compromised, select it and click "Report Cracked License" to mark it as cracked on the blockchain.
+                      </p>
+                    </div>
+                    <div>
+                      <h4 className="text-lg font-semibold text-gray-700">How do I search for software?</h4>
+                      <p className="text-gray-600">
+                        Use the search bar above the "Approved Software" or "All Approved Software" tables to filter by name, version, hash, or developer email.
+                      </p>
+                    </div>
+                    <div>
+                      <h4 className="text-lg font-semibold text-gray-700">What if I encounter an error?</h4>
+                      <p className="text-gray-600">
+                        Ensure MetaMask is connected to Ganache (chainId 1337). Check error messages displayed on the dashboard or contact support.
+                      </p>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
