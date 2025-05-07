@@ -1,6 +1,7 @@
-from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Form
+from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Form, status
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import models
@@ -26,6 +27,28 @@ load_dotenv()
 # Create FastAPI app
 app = FastAPI()
 
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "*"],
+)
+
+# Log middleware initialization
+logger.info("CORS middleware initialized with allow_origins: http://localhost:5173")
+
+# Global exception handler to ensure CORS headers on errors
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "Internal server error"},
+        headers={"Access-Control-Allow-Origin": "http://localhost:5173", "Access-Control-Allow-Credentials": "true"}
+    )
+
 # Create database tables
 try:
     models.Base.metadata.create_all(bind=engine)
@@ -33,15 +56,6 @@ try:
 except Exception as e:
     logger.error(f"Failed to create database tables: {e}")
     raise
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # JWT settings
 JWT_SECRET = os.getenv("JWT_SECRET")
@@ -91,6 +105,10 @@ class OtpVerify(BaseModel):
 class UserUpdate(BaseModel):
     address: str
 
+class FeedbackRequest(BaseModel):
+    email: str
+    feedback: str
+
 # OTP storage (in-memory for development; use Redis in production)
 otp_store = {}
 
@@ -121,14 +139,22 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
         email: str = payload.get("email")
-        if email is None:
-            raise HTTPException(status_code=401, detail="Invalid token")
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        role: str = payload.get("role")
+        if email is None or role is None:
+            logger.warning(f"Invalid token: Missing email or role. Payload: {payload}")
+            raise HTTPException(status_code=401, detail="Invalid token: Missing email or role")
+        logger.info(f"Token decoded successfully: email={email}, role={role}")
+    except jwt.PyJWTError as e:
+        logger.warning(f"JWT decode error: {str(e)}")
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
     
     user = db.query(models.User).filter(models.User.email == email).first()
     if user is None:
+        logger.warning(f"User not found for email: {email}")
         raise HTTPException(status_code=401, detail="User not found")
+    if user.role != role:
+        logger.warning(f"Role mismatch for {email}: token_role={role}, db_role={user.role}")
+        raise HTTPException(status_code=403, detail="Role mismatch")
     return user
 
 # Endpoint for user registration
@@ -160,7 +186,9 @@ async def register(user: UserRegister, db: Session = Depends(get_db)):
             email=user.email,
             hashed_password=hashed_password,
             role="user",
-            is_approved=False
+            is_approved=False,
+            is_rejected=False,
+            is_archived=False
         )
         db.add(db_user)
         db.commit()
@@ -196,9 +224,9 @@ async def login(user: UserLogin, db: Session = Depends(get_db)):
         logger.warning(f"Login failed for {user.email}: Invalid password")
         raise HTTPException(status_code=401, detail="Invalid email or password")
     
-    if not db_user.is_approved:
-        logger.warning(f"Login failed for {user.email}: Account not approved")
-        raise HTTPException(status_code=403, detail="Account not approved by admin")
+    if not db_user.is_approved or db_user.is_rejected or db_user.is_archived:
+        logger.warning(f"Login failed for {user.email}: Account not found")
+        raise HTTPException(status_code=403, detail="Account not found")
 
     otp = ''.join(random.choices(string.digits, k=6))
     otp_store[user.email] = otp
@@ -224,9 +252,9 @@ async def resend_otp(email: str, db: Session = Depends(get_db)):
         logger.warning(f"Resend OTP failed: {email} not found")
         raise HTTPException(status_code=404, detail="User not found")
     
-    if not db_user.is_approved:
-        logger.warning(f"Resend OTP failed for {email}: Account not approved")
-        raise HTTPException(status_code=403, detail="Account not approved by admin")
+    if not db_user.is_approved or db_user.is_rejected or db_user.is_archived:
+        logger.warning(f"Resend OTP failed for {email}: Account not approved, rejected, or archived")
+        raise HTTPException(status_code=403, detail="Account not approved, rejected, or archived")
 
     otp = ''.join(random.choices(string.digits, k=6))
     otp_store[email] = otp
@@ -253,9 +281,9 @@ async def verify_otp(data: OtpVerify, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid OTP")
 
     db_user = db.query(models.User).filter(models.User.email == data.email).first()
-    if not db_user or not db_user.is_approved:
-        logger.warning(f"OTP verification failed for {data.email}: User not approved")
-        raise HTTPException(status_code=403, detail="Account not approved by admin")
+    if not db_user or not db_user.is_approved or db_user.is_rejected or db_user.is_archived:
+        logger.warning(f"OTP verification failed for {data.email}: User not approved, rejected, or archived")
+        raise HTTPException(status_code=403, detail="Account not approved, rejected, or archived")
 
     try:
         token = jwt.encode({"email": data.email, "role": db_user.role}, JWT_SECRET, algorithm=ALGORITHM)
@@ -279,6 +307,8 @@ async def get_current_user_endpoint(current_user: models.User = Depends(get_curr
         "email": current_user.email,
         "role": current_user.role,
         "is_approved": current_user.is_approved,
+        "is_rejected": current_user.is_rejected,
+        "is_archived": current_user.is_archived,
         "address": current_user.address
     }
 
@@ -291,81 +321,270 @@ async def update_user_address(
 ):
     logger.info(f"Updating address for user {current_user.email}")
     try:
+        if not data.address:
+            logger.warning(f"Address update failed for {current_user.email}: Address is empty")
+            raise HTTPException(status_code=400, detail="Address cannot be empty")
         current_user.address = data.address
         db.commit()
         db.refresh(current_user)
         logger.info(f"Address updated for {current_user.email}: {data.address}")
         return {"message": "Address updated successfully"}
+    except HTTPException as e:
+        raise e
     except Exception as e:
-        logger.error(f"Database error during address update: {e}")
-        raise HTTPException(status_code=500, detail="Database error")
+        logger.error(f"Database error during address update for {current_user.email}: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 # Admin endpoints
 @app.get("/admin/pending-users")
 async def get_pending_users(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logger.info(f"Fetching pending users by {current_user.email}")
     if current_user.role != "admin":
-        logger.warning(f"Unauthorized access to pending-users by {current_user.email}")
+        logger.warning(f"Unauthorized access to pending-users by {current_user.email} (role: {current_user.role})")
         raise HTTPException(status_code=403, detail="Admin access required")
     
-    users = db.query(models.User).filter(models.User.is_approved == False).all()
-    return {"pending_users": [{"email": user.email} for user in users]}
+    try:
+        users = db.query(models.User).filter(
+            models.User.is_approved == False,
+            models.User.is_rejected == False,
+            models.User.is_archived == False
+        ).all()
+        logger.info(f"Retrieved {len(users)} pending users: {[user.email for user in users]}")
+        return {"pending_users": [{"email": user.email, "role": user.role} for user in users]}
+    except Exception as e:
+        logger.error(f"Database error in get_pending_users: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+@app.get("/admin/accepted-users")
+async def get_accepted_users(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logger.info(f"Fetching accepted users by {current_user.email}")
+    if current_user.role != "admin":
+        logger.warning(f"Unauthorized access to accepted-users by {current_user.email} (role: {current_user.role})")
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        users = db.query(models.User).filter(
+            models.User.is_approved == True,
+            models.User.is_archived == False
+        ).all()
+        logger.info(f"Retrieved {len(users)} accepted users: {[user.email for user in users]}")
+        return {"accepted_users": [{"email": user.email, "role": user.role} for user in users]}
+    except Exception as e:
+        logger.error(f"Database error in get_accepted_users: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+@app.get("/admin/rejected-users")
+async def get_rejected_users(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logger.info(f"Fetching rejected users by {current_user.email}")
+    if current_user.role != "admin":
+        logger.warning(f"Unauthorized access to rejected-users by {current_user.email} (role: {current_user.role})")
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        users = db.query(models.User).filter(
+            models.User.is_rejected == True,
+            models.User.is_archived == False
+        ).all()
+        logger.info(f"Retrieved {len(users)} rejected users: {[user.email for user in users]}")
+        return {"rejected_users": [{"email": user.email, "role": user.role} for user in users]}
+    except Exception as e:
+        logger.error(f"Database error in get_rejected_users: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+@app.get("/admin/archived-users")
+async def get_archived_users(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logger.info(f"Fetching archived users by {current_user.email}")
+    if current_user.role != "admin":
+        logger.warning(f"Unauthorized access to archived-users by {current_user.email} (role: {current_user.role})")
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        users = db.query(models.User).filter(
+            models.User.is_archived == True
+        ).all()
+        logger.info(f"Retrieved {len(users)} archived users: {[user.email for user in users]}")
+        return {"archived_users": [{"email": user.email, "role": user.role} for user in users]}
+    except Exception as e:
+        logger.error(f"Database error in get_archived_users: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.post("/admin/approve-user/{email}")
 async def approve_user(email: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logger.info(f"User approval attempt for {email} by {current_user.email}")
     if current_user.role != "admin":
         logger.warning(f"Unauthorized user approval attempt by {current_user.email}")
         raise HTTPException(status_code=403, detail="Admin access required")
     
-    user = db.query(models.User).filter(models.User.email == email).first()
-    if not user:
-        logger.warning(f"User approval failed: {email} not found")
-        raise HTTPException(status_code=404, detail="User not found")
-    if user.is_approved:
-        logger.warning(f"User approval failed: {email} already approved")
-        raise HTTPException(status_code=400, detail="User already approved")
-    
-    user.is_approved = True
-    db.commit()
-    logger.info(f"User {email} approved by {current_user.email}")
-    
     try:
-        await send_email(
-            email,
-            "Account Approved",
-            "Your account has been approved. You can now log in to the system."
-        )
+        user = db.query(models.User).filter(models.User.email == email).first()
+        if not user:
+            logger.warning(f"User approval failed: {email} not found")
+            raise HTTPException(status_code=404, detail="User not found")
+        if user.is_approved:
+            logger.warning(f"User approval failed: {email} already approved")
+            raise HTTPException(status_code=400, detail="User already approved")
+        if user.is_archived:
+            logger.warning(f"User approval failed: {email} is archived")
+            raise HTTPException(status_code=400, detail="User is archived")
+        
+        user.is_approved = True
+        user.is_rejected = False
+        db.commit()
+        logger.info(f"User {email} approved by {current_user.email}")
+        
+        try:
+            await send_email(
+                email,
+                "Account Approved",
+                "Your account has been approved. You can now log in to the system."
+            )
+        except Exception as e:
+            logger.error(f"Failed to send approval email to {email}: {e}")
+            logger.warning("Proceeding with user approval despite email failure")
+        
+        return {"message": f"User {email} approved"}
+    except HTTPException as e:
+        raise e
     except Exception as e:
-        logger.error(f"Failed to send approval email to {email}: {e}")
-        logger.warning("Proceeding with user approval despite email failure")
-    
-    return {"message": f"User {email} approved"}
+        logger.error(f"Database error during user approval for {email}: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.post("/admin/reject-user/{email}")
 async def reject_user(email: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logger.info(f"User rejection attempt for {email} by {current_user.email}")
     if current_user.role != "admin":
         logger.warning(f"Unauthorized user rejection attempt by {current_user.email}")
         raise HTTPException(status_code=403, detail="Admin access required")
     
-    user = db.query(models.User).filter(models.User.email == email).first()
-    if not user:
-        logger.warning(f"User rejection failed: {email} not found")
-        raise HTTPException(status_code=404, detail="User not found")
+    try:
+        user = db.query(models.User).filter(models.User.email == email).first()
+        if not user:
+            logger.warning(f"User rejection failed: {email} not found")
+            raise HTTPException(status_code=404, detail="User not found")
+        if user.is_rejected:
+            logger.warning(f"User rejection failed: {email} already rejected")
+            raise HTTPException(status_code=400, detail="User already rejected")
+        if user.is_archived:
+            logger.warning(f"User rejection failed: {email} is archived")
+            raise HTTPException(status_code=400, detail="User is archived")
+        
+        user.is_rejected = True
+        user.is_approved = False
+        db.commit()
+        logger.info(f"User {email} rejected by {current_user.email}")
+        
+        try:
+            await send_email(
+                email,
+                "Account Rejected",
+                "Your registration was rejected by the admin. Please contact support for more information."
+            )
+        except Exception as e:
+            logger.error(f"Failed to send rejection email to {email}: {e}")
+            logger.warning("Proceeding with user rejection despite email failure")
+        
+        return {"message": f"User {email} rejected"}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Database error during user rejection for {email}: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+@app.post("/admin/archive-user/{email}")
+async def archive_user(email: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logger.info(f"User archive attempt for {email} by {current_user.email}")
+    if current_user.role != "admin":
+        logger.warning(f"Unauthorized user archive attempt by {current_user.email}")
+        raise HTTPException(status_code=403, detail="Admin access required")
     
-    db.delete(user)
-    db.commit()
-    logger.info(f"User {email} rejected by {current_user.email}")
+    try:
+        user = db.query(models.User).filter(models.User.email == email).first()
+        if not user:
+            logger.warning(f"User archive failed: {email} not found")
+            raise HTTPException(status_code=404, detail="User not found")
+        if user.is_archived:
+            logger.warning(f"User archive failed: {email} already archived")
+            raise HTTPException(status_code=400, detail="User already archived")
+        if user.role == "admin":
+            logger.warning(f"User archive failed: Cannot archive admin user {email}")
+            raise HTTPException(status_code=400, detail="Cannot archive admin user")
+        
+        user.is_archived = True
+        db.commit()
+        logger.info(f"User {email} archived by {current_user.email}")
+        
+        try:
+            await send_email(
+                email,
+                "Account Archived",
+                "Your account has been archived by the admin. Please contact support for more information."
+            )
+        except Exception as e:
+            logger.error(f"Failed to send archive email to {email}: {e}")
+            logger.warning("Proceeding with user archive despite email failure")
+        
+        return {"message": f"User {email} archived"}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Database error during user archive for {email}: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+@app.post("/admin/unarchive-user/{email}")
+async def unarchive_user(email: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logger.info(f"User unarchive attempt for {email} by {current_user.email}")
+    if current_user.role != "admin":
+        logger.warning(f"Unauthorized user unarchive attempt by {current_user.email}")
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        user = db.query(models.User).filter(models.User.email == email).first()
+        if not user:
+            logger.warning(f"User unarchive failed: {email} not found")
+            raise HTTPException(status_code=404, detail="User not found")
+        if not user.is_archived:
+            logger.warning(f"User unarchive failed: {email} not archived")
+            raise HTTPException(status_code=400, detail="User is not archived")
+        
+        user.is_archived = False
+        db.commit()
+        logger.info(f"User {email} unarchived by {current_user.email}")
+        
+        try:
+            await send_email(
+                email,
+                "Account Unarchived",
+                "Your account has been unarchived by the admin. You can now log in to the system."
+            )
+        except Exception as e:
+            logger.error(f"Failed to send unarchive email to {email}: {e}")
+            logger.warning("Proceeding with user unarchive despite email failure")
+        
+        return {"message": f"User {email} unarchived"}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Database error during user unarchive for {email}: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+@app.post("/admin/feedback")
+async def submit_feedback(feedback: FeedbackRequest, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logger.info(f"Feedback submission attempt from {feedback.email} by {current_user.email}")
+    if current_user.role != "admin":
+        logger.warning(f"Unauthorized feedback submission attempt by {current_user.email}")
+        raise HTTPException(status_code=403, detail="Admin access required")
     
     try:
         await send_email(
-            email,
-            "Account Rejected",
-            "Your registration was rejected by the admin. Please contact support for more information."
+            "admin@example.com",
+            "New Feedback Submission",
+            f"Feedback from {feedback.email}:\n\n{feedback.feedback}"
         )
+        logger.info(f"Feedback email sent to admin@example.com")
+        return {"message": "Feedback submitted successfully"}
     except Exception as e:
-        logger.error(f"Failed to send rejection email to {email}: {e}")
-        logger.warning("Proceeding with user rejection despite email failure")
-    
-    return {"message": f"User {email} rejected"}
+        logger.error(f"Failed to send feedback email: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to send feedback email: {str(e)}")
 
 @app.post("/admin/create-admin")
 async def create_admin(admin_data: CreateAdminRequest, db: Session = Depends(get_db)):
@@ -397,7 +616,9 @@ async def create_admin(admin_data: CreateAdminRequest, db: Session = Depends(get
             email=admin_data.email,
             hashed_password=hashed_password,
             role="admin",
-            is_approved=True
+            is_approved=True,
+            is_rejected=False,
+            is_archived=False
         )
         db.add(db_admin)
         db.commit()
@@ -429,19 +650,19 @@ async def upload_software(
     db: Session = Depends(get_db)
 ):
     logger.info(f"Received upload request: name={name}, version={version}, file={file.filename}")
-    if not current_user.is_approved:
-        logger.warning(f"Unauthorized software upload by unapproved user {current_user.email}")
-        raise HTTPException(status_code=403, detail="Account not approved")
+    if not current_user.is_approved or current_user.is_rejected or current_user.is_archived:
+        logger.warning(f"Unauthorized software upload by unapproved/rejected/archived user {current_user.email}")
+        raise HTTPException(status_code=403, detail="Account not approved, rejected, or archived")
     
     contents = await file.read()
     file_hash = hashlib.sha256(contents).hexdigest()
     
-    existing_software = db.query(models.Software).filter(models.Software.hash == file_hash).first()
-    if existing_software:
-        logger.warning(f"Software upload failed: Hash {file_hash} already exists")
-        raise HTTPException(status_code=400, detail="Software already exists")
-
     try:
+        existing_software = db.query(models.Software).filter(models.Software.hash == file_hash).first()
+        if existing_software:
+            logger.warning(f"Software upload failed: Hash {file_hash} already exists")
+            raise HTTPException(status_code=400, detail="Software already exists")
+
         software = models.Software(
             name=name,
             version=version,
@@ -454,9 +675,11 @@ async def upload_software(
         db.commit()
         db.refresh(software)
         logger.info(f"Software {name} uploaded by {current_user.email}")
+    except HTTPException as e:
+        raise e
     except Exception as e:
         logger.error(f"Database error during software upload: {e}")
-        raise HTTPException(status_code=500, detail="Database error")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
     try:
         await send_email(
@@ -472,132 +695,211 @@ async def upload_software(
 
 @app.get("/software/pending")
 async def get_pending_software_user(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if not current_user.is_approved:
+    logger.info(f"Fetching pending software for {current_user.email}")
+    if not current_user.is_approved or current_user.is_rejected or current_user.is_archived:
         logger.warning(f"Unauthorized access to pending software by {current_user.email}")
-        raise HTTPException(status_code=403, detail="Account not approved")
+        raise HTTPException(status_code=403, detail="Account not approved, rejected, or archived")
     
-    software = db.query(models.Software).filter(
-        models.Software.developer_email == current_user.email,
-        models.Software.is_approved == False,
-        models.Software.is_rejected == False
-    ).all()
-    return {"pending_software": [{"name": s.name, "version": s.version, "hash": s.hash} for s in software]}
+    try:
+        software = db.query(models.Software).filter(
+            models.Software.developer_email == current_user.email,
+            models.Software.is_approved == False,
+            models.Software.is_rejected == False
+        ).all()
+        logger.info(f"Retrieved {len(software)} pending software items for {current_user.email}")
+        return {"pending_software": [{"name": s.name, "version": s.version, "hash": s.hash} for s in software]}
+    except Exception as e:
+        logger.error(f"Database error in get_pending_software_user: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.get("/software/approved")
 async def get_approved_software(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if not current_user.is_approved:
+    logger.info(f"Fetching approved software for {current_user.email}")
+    if not current_user.is_approved or current_user.is_rejected or current_user.is_archived:
         logger.warning(f"Unauthorized access to approved software by {current_user.email}")
-        raise HTTPException(status_code=403, detail="Account not approved")
+        raise HTTPException(status_code=403, detail="Account not approved, rejected, or archived")
     
-    software = db.query(models.Software).filter(
-        models.Software.developer_email == current_user.email,
-        models.Software.is_approved == True,
-        models.Software.is_rejected == False
-    ).all()
-    return {"approved_software": [{"name": s.name, "version": s.version, "hash": s.hash} for s in software]}
+    try:
+        software = db.query(models.Software).filter(
+            models.Software.developer_email == current_user.email,
+            models.Software.is_approved == True,
+            models.Software.is_rejected == False
+        ).all()
+        logger.info(f"Retrieved {len(software)} approved software items for {current_user.email}")
+        return {"approved_software": [{"name": s.name, "version": s.version, "hash": s.hash} for s in software]}
+    except Exception as e:
+        logger.error(f"Database error in get_approved_software: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.get("/software/rejected")
 async def get_rejected_software(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if not current_user.is_approved:
+    logger.info(f"Fetching rejected software for {current_user.email}")
+    if not current_user.is_approved or current_user.is_rejected or current_user.is_archived:
         logger.warning(f"Unauthorized access to rejected software by {current_user.email}")
-        raise HTTPException(status_code=403, detail="Account not approved")
+        raise HTTPException(status_code=403, detail="Account not approved, rejected, or archived")
     
-    software = db.query(models.Software).filter(
-        models.Software.developer_email == current_user.email,
-        models.Software.is_rejected == True
-    ).all()
-    return {"rejected_software": [{"name": s.name, "version": s.version, "hash": s.hash} for s in software]}
+    try:
+        software = db.query(models.Software).filter(
+            models.Software.developer_email == current_user.email,
+            models.Software.is_rejected == True
+        ).all()
+        logger.info(f"Retrieved {len(software)} rejected software items for {current_user.email}")
+        return {"rejected_software": [{"name": s.name, "version": s.version, "hash": s.hash} for s in software]}
+    except Exception as e:
+        logger.error(f"Database error in get_rejected_software: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.get("/software/all-approved")
 async def get_all_approved_software(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if not current_user.is_approved:
+    logger.info(f"Fetching all approved software for {current_user.email}")
+    if not current_user.is_approved or current_user.is_rejected or current_user.is_archived:
         logger.warning(f"Unauthorized access to all approved software by {current_user.email}")
-        raise HTTPException(status_code=403, detail="Account not approved")
+        raise HTTPException(status_code=403, detail="Account not approved, rejected, or archived")
     
-    software = db.query(models.Software).filter(
-        models.Software.is_approved == True,
-        models.Software.is_rejected == False
-    ).all()
-    return {"all_approved_software": [{"name": s.name, "version": s.version, "hash": s.hash, "developer_email": s.developer_email} for s in software]}
+    try:
+        software = db.query(models.Software).filter(
+            models.Software.is_approved == True,
+            models.Software.is_rejected == False
+        ).all()
+        logger.info(f"Retrieved {len(software)} all approved software items")
+        return {"all_approved_software": [{"name": s.name, "version": s.version, "hash": s.hash, "developer_email": s.developer_email} for s in software]}
+    except Exception as e:
+        logger.error(f"Database error in get_all_approved_software: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.get("/admin/pending-software")
 async def get_pending_software(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logger.info(f"Fetching pending software by {current_user.email}")
     if current_user.role != "admin":
         logger.warning(f"Unauthorized access to pending-software by {current_user.email}")
         raise HTTPException(status_code=403, detail="Admin access required")
     
-    software = db.query(models.Software).filter(
-        models.Software.is_approved == False,
-        models.Software.is_rejected == False
-    ).all()
-    return {"pending_software": [{"name": s.name, "version": s.version, "hash": s.hash, "developer_email": s.developer_email} for s in software]}
+    try:
+        software = db.query(models.Software).filter(
+            models.Software.is_approved == False,
+            models.Software.is_rejected == False
+        ).all()
+        logger.info(f"Retrieved {len(software)} pending software items")
+        return {"pending_software": [{"name": s.name, "version": s.version, "hash": s.hash, "developer_email": s.developer_email} for s in software]}
+    except Exception as e:
+        logger.error(f"Database error in get_pending_software: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+@app.get("/admin/accepted-software")
+async def get_accepted_software(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logger.info(f"Fetching accepted software by {current_user.email}")
+    if current_user.role != "admin":
+        logger.warning(f"Unauthorized access to accepted-software by {current_user.email}")
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        software = db.query(models.Software).filter(
+            models.Software.is_approved == True,
+            models.Software.is_rejected == False
+        ).all()
+        logger.info(f"Retrieved {len(software)} accepted software items")
+        return {"accepted_software": [{"name": s.name, "version": s.version, "hash": s.hash, "developer_email": s.developer_email} for s in software]}
+    except Exception as e:
+        logger.error(f"Database error in get_accepted_software: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+@app.get("/admin/rejected-software")
+async def get_rejected_software(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logger.info(f"Fetching rejected software by {current_user.email}")
+    if current_user.role != "admin":
+        logger.warning(f"Unauthorized access to rejected-software by {current_user.email}")
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        software = db.query(models.Software).filter(
+            models.Software.is_rejected == True
+        ).all()
+        logger.info(f"Retrieved {len(software)} rejected software items")
+        return {"rejected_software": [{"name": s.name, "version": s.version, "hash": s.hash, "developer_email": s.developer_email} for s in software]}
+    except Exception as e:
+        logger.error(f"Database error in get_rejected_software: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.post("/admin/approve-software/{hash}")
 async def approve_software(hash: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logger.info(f"Software approval attempt for hash {hash} by {current_user.email}")
     if current_user.role != "admin":
         logger.warning(f"Unauthorized software approval attempt by {current_user.email}")
         raise HTTPException(status_code=403, detail="Admin access required")
     
-    software = db.query(models.Software).filter(models.Software.hash == hash).first()
-    if not software:
-        logger.warning(f"Software approval failed: Hash {hash} not found")
-        raise HTTPException(status_code=404, detail="Software not found")
-    
-    if software.is_approved:
-        logger.warning(f"Software approval failed: Hash {hash} already approved")
-        raise HTTPException(status_code=400, detail="Software already approved")
-    
-    if software.is_rejected:
-        logger.warning(f"Software approval failed: Hash {hash} is rejected")
-        raise HTTPException(status_code=400, detail="Software is rejected")
-    
-    software.is_approved = True
-    db.commit()
-    logger.info(f"Software {software.name} approved by {current_user.email}")
-    
     try:
-        await send_email(
-            software.developer_email,
-            "Software Approved",
-            f"Your software {software.name} (version {software.version}) has been approved and can now be licensed."
-        )
+        software = db.query(models.Software).filter(models.Software.hash == hash).first()
+        if not software:
+            logger.warning(f"Software approval failed: Hash {hash} not found")
+            raise HTTPException(status_code=404, detail="Software not found")
+        
+        if software.is_approved:
+            logger.warning(f"Software approval failed: Hash {hash} already approved")
+            raise HTTPException(status_code=400, detail="Software already approved")
+        
+        if software.is_rejected:
+            logger.warning(f"Software approval failed: Hash {hash} is rejected")
+            raise HTTPException(status_code=400, detail="Software is rejected")
+        
+        software.is_approved = True
+        db.commit()
+        logger.info(f"Software {software.name} approved by {current_user.email}")
+        
+        try:
+            await send_email(
+                software.developer_email,
+                "Software Approved",
+                f"Your software {software.name} (version {software.version}) has been approved and can now be licensed."
+            )
+        except Exception as e:
+            logger.error(f"Failed to send approval email to {software.developer_email}: {e}")
+            logger.warning("Proceeding with software approval despite email failure")
+        
+        return {"message": "Software approved"}
+    except HTTPException as e:
+        raise e
     except Exception as e:
-        logger.error(f"Failed to send approval email to {software.developer_email}: {e}")
-        logger.warning("Proceeding with software approval despite email failure")
-    
-    return {"message": "Software approved"}
+        logger.error(f"Database error during software approval for hash {hash}: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.post("/admin/reject-software/{hash}")
 async def reject_software(hash: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logger.info(f"Software rejection attempt for hash {hash} by {current_user.email}")
     if current_user.role != "admin":
         logger.warning(f"Unauthorized software rejection attempt by {current_user.email}")
         raise HTTPException(status_code=403, detail="Admin access required")
     
-    software = db.query(models.Software).filter(models.Software.hash == hash).first()
-    if not software:
-        logger.warning(f"Software rejection failed: Hash {hash} not found")
-        raise HTTPException(status_code=404, detail="Software not found")
-    
-    if software.is_approved:
-        logger.warning(f"Software rejection failed: Hash {hash} already approved")
-        raise HTTPException(status_code=400, detail="Software already approved")
-    
-    if software.is_rejected:
-        logger.warning(f"Software rejection failed: Hash {hash} already rejected")
-        raise HTTPException(status_code=400, detail="Software already rejected")
-    
-    software.is_rejected = True
-    db.commit()
-    logger.info(f"Software {software.name} rejected by {current_user.email}")
-    
     try:
-        await send_email(
-            software.developer_email,
-            "Software Rejected",
-            f"Your software {software.name} (version {software.version}) was rejected. Please contact support for more information."
-        )
+        software = db.query(models.Software).filter(models.Software.hash == hash).first()
+        if not software:
+            logger.warning(f"Software rejection failed: Hash {hash} not found")
+            raise HTTPException(status_code=404, detail="Software not found")
+        
+        if software.is_approved:
+            logger.warning(f"Software rejection failed: Hash {hash} already approved")
+            raise HTTPException(status_code=400, detail="Software already approved")
+        
+        if software.is_rejected:
+            logger.warning(f"Software rejection failed: Hash {hash} already rejected")
+            raise HTTPException(status_code=400, detail="Software already rejected")
+        
+        software.is_rejected = True
+        db.commit()
+        logger.info(f"Software {software.name} rejected by {current_user.email}")
+        
+        try:
+            await send_email(
+                software.developer_email,
+                "Software Rejected",
+                f"Your software {software.name} (version {software.version}) was rejected. Please contact support for more information."
+            )
+        except Exception as e:
+            logger.error(f"Failed to send rejection email to {software.developer_email}: {e}")
+            logger.warning("Proceeding with software rejection despite email failure")
+        
+        return {"message": "Software rejected"}
+    except HTTPException as e:
+        raise e
     except Exception as e:
-        logger.error(f"Failed to send rejection email to {software.developer_email}: {e}")
-        logger.warning("Proceeding with software rejection despite email failure")
-    
-    return {"message": "Software rejected"}
+        logger.error(f"Database error during software rejection for hash {hash}: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")

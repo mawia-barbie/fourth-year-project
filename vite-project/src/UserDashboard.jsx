@@ -1045,11 +1045,11 @@ const UserDashboard = () => {
                 onClick={() => setShowFaq(!showFaq)}
                 className="w-full bg-gradient-to-r from-pink-500 to-rose-500 text-white text-xl py-4 px-8 rounded-xl hover:from-pink-600 hover:to-rose-600 focus:outline-none focus:ring-4 focus:ring-pink-400 transition-all duration-300 shadow-lg"
               >
-                {showFaq ? 'Hide Help & FAQ' : 'Show Help & FAQ'}
+                {showFaq ? 'Hide FAQ' : 'Show FAQ'}
               </button>
               {showFaq && (
                 <div className="mt-6 bg-pink-50 p-6 rounded-xl">
-                  <h3 className="text-2xl font-semibold text-gray-800 mb-4">Help & FAQ</h3>
+                  <h3 className="text-2xl font-semibold text-gray-800 mb-4">FAQ</h3>
                   <div className="space-y-4">
                     <div>
                       <h4 className="text-lg font-semibold text-gray-700">How do I upload software?</h4>

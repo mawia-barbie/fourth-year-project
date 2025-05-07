@@ -5,11 +5,16 @@ import axios from 'axios';
 import LicenseManagerArtifact from './LicenseManager.json';
 
 const AdminDashboard = () => {
-  const [activeTab, setActiveTab] = useState('users');
+  const [activeTab, setActiveTab] = useState('pending-users');
   const [pendingUsers, setPendingUsers] = useState([]);
+  const [acceptedUsers, setAcceptedUsers] = useState([]);
+  const [rejectedUsers, setRejectedUsers] = useState([]);
+  const [archivedUsers, setArchivedUsers] = useState([]);
   const [pendingSoftware, setPendingSoftware] = useState([]);
-  const [newAdminEmail, setNewAdminEmail] = useState('');
-  const [newAdminPassword, setNewAdminPassword] = useState('');
+  const [acceptedSoftware, setAcceptedSoftware] = useState([]);
+  const [rejectedSoftware, setRejectedSoftware] = useState([]);
+  const [feedbackEmail, setFeedbackEmail] = useState('');
+  const [feedbackText, setFeedbackText] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -19,12 +24,12 @@ const AdminDashboard = () => {
   const connectionLock = useRef(false);
   const navigate = useNavigate();
   const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-  const contractAddress = '0xc3ec5bd913e1D958e026C1D198E7905b9DecAfB9'; // Update with actual deployed address
+  const contractAddress = '0xc3ec5bd913e1D958e026C1D198E7905b9DecAfB9';
   const contractABI = LicenseManagerArtifact.abi;
   const maxRetries = 3;
   const retryDelay = 5000;
 
-  // Connect to MetaMask
+  // Connect to MetaMask with retry logic
   async function connectWallet(retryCount = 0) {
     if (connectionLock.current) {
       console.log('Connection already in progress, waiting...');
@@ -55,7 +60,7 @@ const AdminDashboard = () => {
         return connectWallet(retryCount + 1);
       }
       setError(`Error connecting to MetaMask: ${err.message}`);
-      console.error('connectWallet error:', err);
+      console.error('connectWallet error:', { message: err.message, code: err.code });
       return null;
     } finally {
       connectionLock.current = false;
@@ -93,7 +98,7 @@ const AdminDashboard = () => {
       return { contract, signer, address: signerAddress };
     } catch (err) {
       setError(`Error initializing contract: ${err.message}`);
-      console.error('initializeContract error:', err);
+      console.error('initializeContract error:', { message: err.message, reason: err.reason });
       return null;
     }
   }
@@ -103,10 +108,12 @@ const AdminDashboard = () => {
     async function autoConnect() {
       const token = localStorage.getItem('token');
       if (!token) {
+        console.warn('No token found, redirecting to login');
         navigate('/login');
         return;
       }
 
+      console.log('Token:', token);
       if (!window.ethereum) {
         setError('Please install MetaMask!');
         console.error('MetaMask not detected');
@@ -118,60 +125,52 @@ const AdminDashboard = () => {
         console.log('Checking for existing MetaMask connection...');
         const accounts = await window.ethereum.request({ method: 'eth_accounts' });
         console.log('Existing accounts check:', accounts);
+        let data;
         if (accounts.length > 0) {
           console.log('Existing MetaMask connection found:', accounts);
-          const data = await initializeContract();
-          if (data) {
-            setContractData(data);
-            setIsConnected(true);
-            setSuccess('Connected to MetaMask');
-            // Update user address in backend
-            await axios.patch(
-              `${API_URL}/users/update-address`,
-              { address: data.address },
-              { headers: { Authorization: `Bearer ${token}` } }
-            );
-            // Verify admin role
-            const userResponse = await axios.get(`${API_URL}/users/me`, {
-              headers: { Authorization: `Bearer ${token}` },
-            });
-            if (userResponse.data.role !== 'admin') {
-              navigate('/dashboard');
-            }
-          } else {
-            setError('Failed to initialize contract. Please try again.');
-          }
+          data = await initializeContract();
         } else {
           console.log('No existing connection, attempting to connect...');
-          const data = await initializeContract();
-          if (data) {
-            setContractData(data);
-            setIsConnected(true);
-            setSuccess('Connected to MetaMask');
-            await axios.patch(
-              `${API_URL}/users/update-address`,
-              { address: data.address },
-              { headers: { Authorization: `Bearer ${token}` } }
-            );
-            const userResponse = await axios.get(`${API_URL}/users/me`, {
-              headers: { Authorization: `Bearer ${token}` },
-            });
-            if (userResponse.data.role !== 'admin') {
-              navigate('/dashboard');
-            }
-          } else {
-            setError('Failed to connect to MetaMask. Please try again.');
+          data = await initializeContract();
+        }
+
+        if (data) {
+          setContractData(data);
+          setIsConnected(true);
+          setSuccess('Connected to MetaMask');
+          const addressResponse = await axios.patch(
+            `${API_URL}/users/update-address`,
+            { address: data.address },
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          console.log('Address update response:', addressResponse.data);
+          const userResponse = await axios.get(`${API_URL}/users/me`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          console.log('User data:', userResponse.data);
+          if (userResponse.data.role !== 'admin') {
+            console.warn('User is not admin, redirecting to dashboard');
+            navigate('/dashboard');
           }
+        } else {
+          setError('Failed to initialize contract. Please try again.');
         }
       } catch (err) {
-        console.error('Auto-connect error:', err);
+        console.error('Auto-connect error:', {
+          message: err.message,
+          status: err.response?.status,
+          data: err.response?.data,
+          headers: err.response?.headers,
+        });
         if (err.response?.status === 401) {
+          console.warn('Unauthorized, clearing token and redirecting to login');
           localStorage.removeItem('token');
           navigate('/login');
         } else if (err.response?.status === 403) {
+          console.warn('Forbidden, redirecting to dashboard');
           navigate('/dashboard');
         } else {
-          setError(`Error connecting to MetaMask: ${err.message}`);
+          setError(`Error connecting to MetaMask or backend: ${err.message}`);
         }
       } finally {
         setIsConnecting(false);
@@ -188,58 +187,100 @@ const AdminDashboard = () => {
     };
   }, [navigate]);
 
-  // Fetch pending users
-  const fetchPendingUsers = async () => {
+  // Fetch data with retry logic
+  const fetchWithRetry = async (url, setData, dataKey, maxRetries = 3, retryDelay = 5000) => {
     setLoading(true);
     setError('');
-    try {
-      const token = localStorage.getItem('token');
-      if (!token) {
-        throw new Error('No token found');
+    const token = localStorage.getItem('token');
+    if (!token) {
+      console.warn('No token found, redirecting to login');
+      navigate('/login');
+      return;
+    }
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`Fetching ${url} (attempt ${attempt}) with token: ${token.slice(0, 10)}...`);
+        const response = await axios.get(url, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        console.log(`${dataKey} raw response:`, JSON.stringify(response.data, null, 2));
+        if (!response.data || typeof response.data !== 'object' || !Array.isArray(response.data[dataKey])) {
+          console.warn(`Invalid response format for ${dataKey}:`, response.data);
+          throw new Error(`Invalid response format for ${dataKey}`);
+        }
+        const data = response.data[dataKey];
+        setData(data);
+        console.log(`${dataKey} set:`, data);
+        if (data.length === 0) {
+          console.log(`No ${dataKey} found`);
+          setError(`No ${dataKey.replace('_', ' ')} available.`);
+        }
+        return;
+      } catch (err) {
+        console.error(`fetch ${dataKey} error (attempt ${attempt}):`, {
+          message: err.message,
+          status: err.response?.status,
+          data: err.response?.data,
+          headers: err.response?.headers,
+        });
+        if (err.response?.status === 401) {
+          console.warn('Unauthorized, clearing token and redirecting to login');
+          localStorage.removeItem('token');
+          navigate('/login');
+          return;
+        } else if (err.response?.status === 403) {
+          console.warn('Forbidden, redirecting to dashboard');
+          navigate('/dashboard');
+          return;
+        } else if (attempt < maxRetries) {
+          console.warn(`Retrying ${url} in ${retryDelay}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
+        } else {
+          setError(err.response?.data?.detail || `Failed to fetch ${dataKey.replace('_', ' ')}: ${err.message}`);
+          setData([]);
+        }
+      } finally {
+        if (attempt === maxRetries || !error) {
+          setLoading(false);
+        }
       }
-      const response = await axios.get(`${API_URL}/admin/pending-users`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      setPendingUsers(response.data.pending_users || []);
-    } catch (err) {
-      if (err.response?.status === 401) {
-        localStorage.removeItem('token');
-        navigate('/login');
-      } else if (err.response?.status === 403) {
-        navigate('/dashboard');
-      } else {
-        setError(err.response?.data?.detail || 'Failed to fetch pending users');
-      }
-    } finally {
-      setLoading(false);
     }
   };
 
+  // Fetch pending users
+  const fetchPendingUsers = () => {
+    fetchWithRetry(`${API_URL}/admin/pending-users`, setPendingUsers, 'pending_users');
+  };
+
+  // Fetch accepted users
+  const fetchAcceptedUsers = () => {
+    fetchWithRetry(`${API_URL}/admin/accepted-users`, setAcceptedUsers, 'accepted_users');
+  };
+
+  // Fetch rejected users
+  const fetchRejectedUsers = () => {
+    fetchWithRetry(`${API_URL}/admin/rejected-users`, setRejectedUsers, 'rejected_users');
+  };
+
+  // Fetch archived users
+  const fetchArchivedUsers = () => {
+    fetchWithRetry(`${API_URL}/admin/archived-users`, setArchivedUsers, 'archived_users');
+  };
+
   // Fetch pending software
-  const fetchPendingSoftware = async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const token = localStorage.getItem('token');
-      if (!token) {
-        throw new Error('No token found');
-      }
-      const response = await axios.get(`${API_URL}/admin/pending-software`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      setPendingSoftware(response.data.pending_software || []);
-    } catch (err) {
-      if (err.response?.status === 401) {
-        localStorage.removeItem('token');
-        navigate('/login');
-      } else if (err.response?.status === 403) {
-        navigate('/dashboard');
-      } else {
-        setError(err.response?.data?.detail || 'Failed to fetch pending software');
-      }
-    } finally {
-      setLoading(false);
-    }
+  const fetchPendingSoftware = () => {
+    fetchWithRetry(`${API_URL}/admin/pending-software`, setPendingSoftware, 'pending_software');
+  };
+
+  // Fetch accepted software
+  const fetchAcceptedSoftware = () => {
+    fetchWithRetry(`${API_URL}/admin/accepted-software`, setAcceptedSoftware, 'accepted_software');
+  };
+
+  // Fetch rejected software
+  const fetchRejectedSoftware = () => {
+    fetchWithRetry(`${API_URL}/admin/rejected-software`, setRejectedSoftware, 'rejected_software');
   };
 
   // Setup event listeners
@@ -248,21 +289,35 @@ const AdminDashboard = () => {
       if (!contractData) return;
       const { contract } = contractData;
       console.log('Setting up event listeners');
-      contract.on('SoftwareApproved', (hash) => {
-        setSuccess(`Software ${hash} approved on blockchain`);
+      contract.on('SoftwareApproved', (hash, event) => {
+        console.log('SoftwareApproved event received:', { hash, event });
+        const hashString = hash.toString();
+        setSuccess(`Software ${hashString} approved on blockchain`);
         fetchPendingSoftware();
-        console.log('SoftwareApproved event:', { hash });
+        fetchAcceptedSoftware();
+        console.log('SoftwareApproved processed:', { hash: hashString });
       });
-      contract.on('SoftwareRejected', (hash) => {
-        setSuccess(`Software ${hash} rejected on blockchain`);
+      contract.on('SoftwareRejected', (hash, event) => {
+        console.log('SoftwareRejected event received:', { hash, event });
+        const hashString = hash.toString();
+        setSuccess(`Software ${hashString} rejected on blockchain`);
         fetchPendingSoftware();
-        console.log('SoftwareRejected event:', { hash });
+        fetchRejectedSoftware();
+        console.log('SoftwareRejected processed:', { hash: hashString });
       });
     }
 
     if (contractData) {
       setupEventListeners();
     }
+
+    return () => {
+      if (contractData?.contract) {
+        console.log('Removing event listeners');
+        contractData.contract.removeAllListeners('SoftwareApproved');
+        contractData.contract.removeAllListeners('SoftwareRejected');
+      }
+    };
   }, [contractData]);
 
   // Handle user approval
@@ -273,14 +328,22 @@ const AdminDashboard = () => {
     setSuccess('');
     try {
       const token = localStorage.getItem('token');
-      await axios.post(
+      const response = await axios.post(
         `${API_URL}/admin/approve-user/${email}`,
         {},
         { headers: { Authorization: `Bearer ${token}` } }
       );
+      console.log('Approve user response:', response.data);
       setPendingUsers(pendingUsers.filter((user) => user.email !== email));
       setSuccess(`User ${email} approved successfully`);
+      fetchAcceptedUsers();
     } catch (err) {
+      console.error('handleApproveUser error:', {
+        message: err.message,
+        status: err.response?.status,
+        data: err.response?.data,
+        headers: err.response?.headers,
+      });
       setError(err.response?.data?.detail || `Failed to approve ${email}`);
     } finally {
       setLoading(false);
@@ -295,15 +358,124 @@ const AdminDashboard = () => {
     setSuccess('');
     try {
       const token = localStorage.getItem('token');
-      await axios.post(
+      const response = await axios.post(
         `${API_URL}/admin/reject-user/${email}`,
         {},
         { headers: { Authorization: `Bearer ${token}` } }
       );
+      console.log('Reject user response:', response.data);
       setPendingUsers(pendingUsers.filter((user) => user.email !== email));
       setSuccess(`User ${email} rejected successfully`);
+      fetchRejectedUsers();
     } catch (err) {
+      console.error('handleRejectUser error:', {
+        message: err.message,
+        status: err.response?.status,
+        data: err.response?.data,
+        headers: err.response?.headers,
+      });
       setError(err.response?.data?.detail || `Failed to reject ${email}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Handle user archiving
+  const handleArchiveUser = async (email, status) => {
+    if (!window.confirm(`Are you sure you want to archive ${email}?`)) return;
+    setLoading(true);
+    setError('');
+    setSuccess('');
+    try {
+      const token = localStorage.getItem('token');
+      const response = await axios.post(
+        `${API_URL}/admin/archive-user/${email}`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      console.log('Archive user response:', response.data);
+      if (status === 'pending') {
+        setPendingUsers(pendingUsers.filter((user) => user.email !== email));
+        fetchPendingUsers();
+      } else if (status === 'accepted') {
+        setAcceptedUsers(acceptedUsers.filter((user) => user.email !== email));
+        fetchAcceptedUsers();
+      } else if (status === 'rejected') {
+        setRejectedUsers(rejectedUsers.filter((user) => user.email !== email));
+        fetchRejectedUsers();
+      }
+      setSuccess(`User ${email} archived successfully`);
+      fetchArchivedUsers();
+    } catch (err) {
+      console.error('handleArchiveUser error:', {
+        message: err.message,
+        status: err.response?.status,
+        data: err.response?.data,
+        headers: err.response?.headers,
+      });
+      setError(err.response?.data?.detail || `Failed to archive ${email}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Handle user unarchiving
+  const handleUnarchiveUser = async (email) => {
+    if (!window.confirm(`Are you sure you want to unarchive ${email}?`)) return;
+    setLoading(true);
+    setError('');
+    setSuccess('');
+    try {
+      const token = localStorage.getItem('token');
+      const response = await axios.post(
+        `${API_URL}/admin/unarchive-user/${email}`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      console.log('Unarchive user response:', response.data);
+      setArchivedUsers(archivedUsers.filter((user) => user.email !== email));
+      setSuccess(`User ${email} unarchived successfully`);
+      fetchPendingUsers();
+      fetchAcceptedUsers();
+      fetchRejectedUsers();
+    } catch (err) {
+      console.error('handleUnarchiveUser error:', {
+        message: err.message,
+        status: err.response?.status,
+        data: err.response?.data,
+        headers: err.response?.headers,
+      });
+      setError(err.response?.data?.detail || `Failed to unarchive ${email}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Handle feedback submission
+  const handleSubmitFeedback = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+    setSuccess('');
+    try {
+      const token = localStorage.getItem('token');
+      const response = await axios.post(
+        `${API_URL}/admin/feedback`,
+        { email: feedbackEmail, feedback: feedbackText },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      console.log('Feedback response:', response.data);
+      setSuccess('Feedback submitted successfully');
+      setFeedbackEmail('');
+      setFeedbackText('');
+    } catch (err) {
+      console.error('handleSubmitFeedback error:', {
+        message: err.message,
+        status: err.response?.status,
+        data: err.response?.data,
+        headers: err.response?.headers,
+      });
+      setError(err.response?.data?.detail || 'Failed to submit feedback');
     } finally {
       setLoading(false);
     }
@@ -322,20 +494,27 @@ const AdminDashboard = () => {
     try {
       const token = localStorage.getItem('token');
       const { contract } = contractData;
-      // Call backend API
-      await axios.post(
+      const apiResponse = await axios.post(
         `${API_URL}/admin/approve-software/${hash}`,
         {},
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      // Call smart contract
+      console.log('Approve software API response:', apiResponse.data);
       const tx = await contract.approveSoftware(hash, { gasLimit: 300000 });
-      await tx.wait();
+      const receipt = await tx.wait();
+      console.log('Blockchain transaction receipt:', receipt);
       setPendingSoftware(pendingSoftware.filter((item) => item.hash !== hash));
       setSuccess(`Software ${hash} approved successfully`);
+      fetchAcceptedSoftware();
     } catch (err) {
+      console.error('handleApproveSoftware error:', {
+        message: err.message,
+        status: err.response?.status,
+        data: err.response?.data,
+        headers: err.response?.headers,
+        reason: err.reason,
+      });
       setError(err.response?.data?.detail || `Failed to approve software: ${err.message}`);
-      console.error('approveSoftware error:', err);
     } finally {
       setLoading(false);
     }
@@ -354,57 +533,68 @@ const AdminDashboard = () => {
     try {
       const token = localStorage.getItem('token');
       const { contract } = contractData;
-      // Call backend API
-      await axios.post(
+      const apiResponse = await axios.post(
         `${API_URL}/admin/reject-software/${hash}`,
         {},
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      // Call smart contract
+      console.log('Reject software API response:', apiResponse.data);
       const tx = await contract.rejectSoftware(hash, { gasLimit: 300000 });
-      await tx.wait();
+      const receipt = await tx.wait();
+      console.log('Blockchain transaction receipt:', receipt);
       setPendingSoftware(pendingSoftware.filter((item) => item.hash !== hash));
       setSuccess(`Software ${hash} rejected successfully`);
+      fetchRejectedSoftware();
     } catch (err) {
+      console.error('handleRejectSoftware error:', {
+        message: err.message,
+        status: err.response?.status,
+        data: err.response?.data,
+        headers: err.response?.headers,
+        reason: err.reason,
+      });
       setError(err.response?.data?.detail || `Failed to reject software: ${err.message}`);
-      console.error('rejectSoftware error:', err);
     } finally {
       setLoading(false);
     }
   };
 
-  // Handle create admin
-  const handleCreateAdmin = async (e) => {
-    e.preventDefault();
-    setError('');
-    setSuccess('');
-    setLoading(true);
-    try {
-      const token = localStorage.getItem('token');
-      const response = await axios.post(
-        `${API_URL}/admin/create-admin`,
-        { email: newAdminEmail, password: newAdminPassword },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      setSuccess(response.data.message);
-      setNewAdminEmail('');
-      setNewAdminPassword('');
-    } catch (err) {
-      setError(err.response?.data?.detail || 'Failed to create admin');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Fetch data when tab changes
+  // Fetch data when tab changes or connection is established
   useEffect(() => {
     if (!isConnected) return;
-    if (activeTab === 'users') {
+    console.log(`Active tab changed to: ${activeTab}`);
+    if (activeTab === 'pending-users') {
       fetchPendingUsers();
-    } else if (activeTab === 'software') {
+    } else if (activeTab === 'accepted-users') {
+      fetchAcceptedUsers();
+    } else if (activeTab === 'rejected-users') {
+      fetchRejectedUsers();
+    } else if (activeTab === 'archived-users') {
+      fetchArchivedUsers();
+    } else if (activeTab === 'pending-software') {
       fetchPendingSoftware();
+    } else if (activeTab === 'accepted-software') {
+      fetchAcceptedSoftware();
+    } else if (activeTab === 'rejected-software') {
+      fetchRejectedSoftware();
     }
   }, [activeTab, isConnected]);
+
+  // Refresh user data manually
+  const handleRefreshUsers = () => {
+    console.log('Manually refreshing user data...');
+    setError('');
+    setSuccess('');
+    if (activeTab === 'pending-users') {
+      fetchPendingUsers();
+    } else if (activeTab === 'accepted-users') {
+      fetchAcceptedUsers();
+    } else if (activeTab === 'rejected-users') {
+      fetchRejectedUsers();
+    } else if (activeTab === 'archived-users') {
+      fetchArchivedUsers();
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-pink-50 to-pink-100 flex items-center justify-center p-6 relative">
@@ -462,11 +652,11 @@ const AdminDashboard = () => {
           </div>
         ) : (
           <>
-            <div className="flex mb-6">
+            <div className="flex mb-6 flex-wrap">
               <button
-                onClick={() => setActiveTab('users')}
+                onClick={() => setActiveTab('pending-users')}
                 className={`px-6 py-3 text-lg font-semibold rounded-t-xl transition-all ${
-                  activeTab === 'users'
+                  activeTab === 'pending-users'
                     ? 'bg-pink-500 text-white'
                     : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                 }`}
@@ -474,9 +664,39 @@ const AdminDashboard = () => {
                 Pending Users
               </button>
               <button
-                onClick={() => setActiveTab('software')}
+                onClick={() => setActiveTab('accepted-users')}
                 className={`px-6 py-3 text-lg font-semibold rounded-t-xl transition-all ${
-                  activeTab === 'software'
+                  activeTab === 'accepted-users'
+                    ? 'bg-pink-500 text-white'
+                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                Accepted Users
+              </button>
+              <button
+                onClick={() => setActiveTab('rejected-users')}
+                className={`px-6 py-3 text-lg font-semibold rounded-t-xl transition-all ${
+                  activeTab === 'rejected-users'
+                    ? 'bg-pink-500 text-white'
+                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                Rejected Users
+              </button>
+              <button
+                onClick={() => setActiveTab('archived-users')}
+                className={`px-6 py-3 text-lg font-semibold rounded-t-xl transition-all ${
+                  activeTab === 'archived-users'
+                    ? 'bg-pink-500 text-white'
+                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                Archived Users
+              </button>
+              <button
+                onClick={() => setActiveTab('pending-software')}
+                className={`px-6 py-3 text-lg font-semibold rounded-t-xl transition-all ${
+                  activeTab === 'pending-software'
                     ? 'bg-pink-500 text-white'
                     : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                 }`}
@@ -484,14 +704,34 @@ const AdminDashboard = () => {
                 Pending Software
               </button>
               <button
-                onClick={() => setActiveTab('create-admin')}
+                onClick={() => setActiveTab('accepted-software')}
                 className={`px-6 py-3 text-lg font-semibold rounded-t-xl transition-all ${
-                  activeTab === 'create-admin'
+                  activeTab === 'accepted-software'
                     ? 'bg-pink-500 text-white'
                     : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                 }`}
               >
-                Create Admin
+                Accepted Software
+              </button>
+              <button
+                onClick={() => setActiveTab('rejected-software')}
+                className={`px-6 py-3 text-lg font-semibold rounded-t-xl transition-all ${
+                  activeTab === 'rejected-software'
+                    ? 'bg-pink-500 text-white'
+                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                Rejected Software
+              </button>
+              <button
+                onClick={() => setActiveTab('feedback')}
+                className={`px-6 py-3 text-lg font-semibold rounded-t-xl transition-all ${
+                  activeTab === 'feedback'
+                    ? 'bg-pink-500 text-white'
+                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                Feedback
               </button>
             </div>
 
@@ -507,17 +747,33 @@ const AdminDashboard = () => {
                 </div>
               )}
 
-              {activeTab === 'users' && (
+              {(activeTab === 'pending-users' ||
+                activeTab === 'accepted-users' ||
+                activeTab === 'rejected-users' ||
+                activeTab === 'archived-users') && (
+                <div className="flex justify-end mb-4">
+                  <button
+                    onClick={handleRefreshUsers}
+                    className="bg-blue-500 text-white px-4 py-2 rounded-xl hover:bg-blue-600 disabled:opacity-50"
+                    disabled={loading}
+                  >
+                    Refresh Users
+                  </button>
+                </div>
+              )}
+
+              {activeTab === 'pending-users' && (
                 <div>
                   <h3 className="text-2xl font-semibold text-gray-800 mb-6">Pending Users</h3>
                   {pendingUsers.length === 0 && !loading ? (
-                    <p className="text-gray-600">No pending users.</p>
+                    <p className="text-gray-600">No pending users available. Try refreshing or check the backend logs.</p>
                   ) : (
                     <div className="overflow-x-auto">
                       <table className="w-full bg-white rounded-lg shadow">
                         <thead>
                           <tr className="bg-pink-100 text-gray-700">
                             <th className="py-3 px-4 text-left">Email</th>
+                            <th className="py-3 px-4 text-left">Role</th>
                             <th className="py-3 px-4 text-left">Actions</th>
                           </tr>
                         </thead>
@@ -525,6 +781,7 @@ const AdminDashboard = () => {
                           {pendingUsers.map((user) => (
                             <tr key={user.email} className="border-b hover:bg-gray-100">
                               <td className="py-3 px-4 text-gray-800">{user.email}</td>
+                              <td className="py-3 px-4 text-gray-800">{user.role}</td>
                               <td className="py-3 px-4">
                                 <button
                                   onClick={() => handleApproveUser(user.email)}
@@ -535,10 +792,17 @@ const AdminDashboard = () => {
                                 </button>
                                 <button
                                   onClick={() => handleRejectUser(user.email)}
-                                  className="bg-red-500 text-white px-4 py-2 rounded-xl hover:bg-red-600 disabled:opacity-50"
+                                  className="bg-red-500 text-white px-4 py-2 rounded-xl mr-2 hover:bg-red-600 disabled:opacity-50"
                                   disabled={loading}
                                 >
                                   Reject
+                                </button>
+                                <button
+                                  onClick={() => handleArchiveUser(user.email, 'pending')}
+                                  className="bg-gray-500 text-white px-4 py-2 rounded-xl hover:bg-gray-600 disabled:opacity-50"
+                                  disabled={loading}
+                                >
+                                  Archive
                                 </button>
                               </td>
                             </tr>
@@ -550,11 +814,129 @@ const AdminDashboard = () => {
                 </div>
               )}
 
-              {activeTab === 'software' && (
+              {activeTab === 'accepted-users' && (
+                <div>
+                  <h3 className="text-2xl font-semibold text-gray-800 mb-6">Accepted Users</h3>
+                  {acceptedUsers.length === 0 && !loading ? (
+                    <p className="text-gray-600">No accepted users available. Try refreshing or check the backend logs.</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full bg-white rounded-lg shadow">
+                        <thead>
+                          <tr className="bg-pink-100 text-gray-700">
+                            <th className="py-3 px-4 text-left">Email</th>
+                            <th className="py-3 px-4 text-left">Role</th>
+                            <th className="py-3 px-4 text-left">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {acceptedUsers.map((user) => (
+                            <tr key={user.email} className="border-b hover:bg-gray-100">
+                              <td className="py-3 px-4 text-gray-800">{user.email}</td>
+                              <td className="py-3 px-4 text-gray-800">{user.role}</td>
+                              <td className="py-3 px-4">
+                                <button
+                                  onClick={() => handleArchiveUser(user.email, 'accepted')}
+                                  className="bg-gray-500 text-white px-4 py-2 rounded-xl hover:bg-gray-600 disabled:opacity-50"
+                                  disabled={loading}
+                                >
+                                  Archive
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeTab === 'rejected-users' && (
+                <div>
+                  <h3 className="text-2xl font-semibold text-gray-800 mb-6">Rejected Users</h3>
+                  {rejectedUsers.length === 0 && !loading ? (
+                    <p className="text-gray-600">No rejected users available. Try refreshing or check the backend logs.</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full bg-white rounded-lg shadow">
+                        <thead>
+                          <tr className="bg-pink-100 text-gray-700">
+                            <th className="py-3 px-4 text-left">Email</th>
+                            <th className="py-3 px-4 text-left">Role</th>
+                            <th className="py-3 px-4 text-left">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rejectedUsers.map((user) => (
+                            <tr key={user.email} className="border-b hover:bg-gray-100">
+                              <td className="py-3 px-4 text-gray-800">{user.email}</td>
+                              <td className="py-3 px-4 text-gray-800">{user.role}</td>
+                              <td className="py-3 px-4">
+                                <button
+                                  onClick={() => handleArchiveUser(user.email, 'rejected')}
+                                  className="bg-gray-500 text-white px-4 py-2 rounded-xl hover:bg-gray-600 disabled:opacity-50"
+                                  disabled={loading}
+                                >
+                                  Archive
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeTab === 'archived-users' && (
+                <div>
+                  <h3 className="text-2xl font-semibold text-gray-800 mb-6">Archived Users</h3>
+                  {archivedUsers.length === 0 && !loading ? (
+                    <p className="text-gray-600">No archived users available. Try refreshing or check the backend logs.</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full bg-white rounded-lg shadow">
+                        <thead>
+                          <tr className="bg-pink-100 text-gray-700">
+                            <th className="py-3 px-4 text-left">Email</th>
+                            <th className="py-3 px-4 text-left">Role</th>
+                            <th className="py-3 px-4 text-left">Status</th>
+                            <th className="py-3 px-4 text-left">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {archivedUsers.map((user) => (
+                            <tr key={user.email} className="border-b hover:bg-gray-100">
+                              <td className="py-3 px-4 text-gray-800">{user.email}</td>
+                              <td className="py-3 px-4 text-gray-800">{user.role}</td>
+                              <td className="py-3 px-4 text-gray-800">
+                                {user.is_approved ? 'Accepted' : user.is_rejected ? 'Rejected' : 'Pending'}
+                              </td>
+                              <td className="py-3 px-4">
+                                <button
+                                  onClick={() => handleUnarchiveUser(user.email)}
+                                  className="bg-blue-500 text-white px-4 py-2 rounded-xl hover:bg-blue-600 disabled:opacity-50"
+                                  disabled={loading}
+                                >
+                                  Unarchive
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeTab === 'pending-software' && (
                 <div>
                   <h3 className="text-2xl font-semibold text-gray-800 mb-6">Pending Software</h3>
                   {pendingSoftware.length === 0 && !loading ? (
-                    <p className="text-gray-600">No pending software.</p>
+                    <p className="text-gray-600">No pending software available.</p>
                   ) : (
                     <div className="overflow-x-auto">
                       <table className="w-full bg-white rounded-lg shadow">
@@ -601,34 +983,99 @@ const AdminDashboard = () => {
                 </div>
               )}
 
-              {activeTab === 'create-admin' && (
+              {activeTab === 'accepted-software' && (
                 <div>
-                  <h3 className="text-2xl font-semibold text-gray-800 mb-6">Create New Admin</h3>
-                  <form onSubmit={handleCreateAdmin} className="max-w-md mx-auto">
+                  <h3 className="text-2xl font-semibold text-gray-800 mb-6">Accepted Software</h3>
+                  {acceptedSoftware.length === 0 && !loading ? (
+                    <p className="text-gray-600">No accepted software available.</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full bg-white rounded-lg shadow">
+                        <thead>
+                          <tr className="bg-pink-100 text-gray-700">
+                            <th className="py-3 px-4 text-left">Name</th>
+                            <th className="py-3 px-4 text-left">Version</th>
+                            <th className="py-3 px-4 text-left">Developer Email</th>
+                            <th className="py-3 px-4 text-left">Hash</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {acceptedSoftware.map((item) => (
+                            <tr key={item.hash} className="border-b hover:bg-gray-100">
+                              <td className="py-3 px-4 text-gray-800">{item.name}</td>
+                              <td className="py-3 px-4 text-gray-800">{item.version}</td>
+                              <td className="py-3 px-4 text-gray-800">{item.developer_email}</td>
+                              <td className="py-3 px-4 text-gray-800 truncate max-w-xs" title={item.hash}>
+                                {item.hash.slice(0, 10)}...
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeTab === 'rejected-software' && (
+                <div>
+                  <h3 className="text-2xl font-semibold text-gray-800 mb-6">Rejected Software</h3>
+                  {rejectedSoftware.length === 0 && !loading ? (
+                    <p className="text-gray-600">No rejected software available.</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full bg-white rounded-lg shadow">
+                        <thead>
+                          <tr className="bg-pink-100 text-gray-700">
+                            <th className="py-3 px-4 text-left">Name</th>
+                            <th className="py-3 px-4 text-left">Version</th>
+                            <th className="py-3 px-4 text-left">Developer Email</th>
+                            <th className="py-3 px-4 text-left">Hash</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rejectedSoftware.map((item) => (
+                            <tr key={item.hash} className="border-b hover:bg-gray-100">
+                              <td className="py-3 px-4 text-gray-800">{item.name}</td>
+                              <td className="py-3 px-4 text-gray-800">{item.version}</td>
+                              <td className="py-3 px-4 text-gray-800">{item.developer_email}</td>
+                              <td className="py-3 px-4 text-gray-800 truncate max-w-xs" title={item.hash}>
+                                {item.hash.slice(0, 10)}...
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeTab === 'feedback' && (
+                <div>
+                  <h3 className="text-2xl font-semibold text-gray-800 mb-6">Submit Feedback</h3>
+                  <form onSubmit={handleSubmitFeedback} className="max-w-md mx-auto">
                     <div className="mb-6">
-                      <label className="block text-gray-700 mb-2 text-lg font-semibold">Email</label>
+                      <label className="block text-gray-700 mb-2 text-lg font-semibold">User Email</label>
                       <input
                         type="email"
-                        value={newAdminEmail}
-                        onChange={(e) => setNewAdminEmail(e.target.value)}
+                        value={feedbackEmail}
+                        onChange={(e) => setFeedbackEmail(e.target.value)}
                         className="w-full text-lg text-gray-700 border border-pink-200 rounded-xl p-3 focus:outline-none focus:ring-4 focus:ring-pink-300 transition-all disabled:opacity-50"
                         required
                         disabled={loading}
                       />
                     </div>
                     <div className="mb-8">
-                      <label className="block text-gray-700 mb-2 text-lg font-semibold">Password</label>
-                      <input
-                        type="password"
-                        value={newAdminPassword}
-                        onChange={(e) => setNewAdminPassword(e.target.value)}
+                      <label className="block text-gray-700 mb-2 text-lg font-semibold">Feedback</label>
+                      <textarea
+                        value={feedbackEmail}
+                        onChange={(e) => setFeedbackEmail(e.target.value)}
                         className="w-full text-lg text-gray-700 border border-pink-200 rounded-xl p-3 focus:outline-none focus:ring-4 focus:ring-pink-300 transition-all disabled:opacity-50"
+                        rows="5"
                         required
                         disabled={loading}
                       />
-                      <p className="text-sm text-gray-600 mt-2">
-                        Password must be 8+ characters with 1 uppercase, 1 number, 1 special character.
-                      </p>
                     </div>
                     <button
                       type="submit"
@@ -644,7 +1091,7 @@ const AdminDashboard = () => {
                           Processing...
                         </span>
                       ) : (
-                        'Create Admin'
+                        'Submit Feedback'
                       )}
                     </button>
                   </form>
