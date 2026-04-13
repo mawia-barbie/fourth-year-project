@@ -1,7 +1,7 @@
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { Component } from 'react';
 import Login from './Login';
-import Register from './Register';
+import Register from './register';
 import SoftwareUpload from './SoftwareUpload';
 import VerifyOtp from './VerifyOtp';
 import AdminDashboard from './AdminDashboard';
